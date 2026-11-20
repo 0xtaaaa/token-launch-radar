@@ -27,6 +27,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { color-scheme: dark; }
 body {
   margin: 0;
@@ -121,6 +122,10 @@ tbody tr.top1 td:first-child { color: var(--amber); font-weight: 700; }
 
 .model { margin-top: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--s3) var(--s4); }
+.valid { width: 100%; border-collapse: collapse; font-size: 13px; }
+.valid th, .valid td { padding: var(--s2) var(--s3); border-bottom: 1px solid var(--border); text-align: left; }
+.valid th { color: var(--muted); font-size: 12px; font-weight: 500; background: none; }
+.valid td.num { font-family: var(--font-num); }
 .foot { margin-top: var(--s5); color: var(--muted); font-size: 12px; max-width: 72ch; }
 .empty { padding: var(--s7) var(--s5); text-align: center; display: grid; gap: var(--s3); justify-items: center; }
 .empty p { color: var(--muted); }
