@@ -32,15 +32,17 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // The model, recomputed here from the snapshot figures the row carries, so
-  // the page can check the number board.json carries with the same arithmetic.
-  function impliedOf(row, model) {
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthF = Math.min(model.growth_factor_max, Math.max(model.growth_factor_min, 1 + (growth / 100) * model.growth_weight));
-    var age = row.age_days === null || row.age_days === undefined ? null : row.age_days;
-    var ageF = age === null ? model.unknown_age_factor : model.age_floor + (Math.min(Math.max(age, 0), model.age_cap_days) / model.age_cap_days) * model.age_range;
-    var breadthF = 1 + Math.min(Math.max((row.chains || []).length - 1, 0), model.breadth_max_chains) * model.breadth_per_chain;
-    return Math.max(1, Math.round(model.scale_coefficient * Math.sqrt(Math.max(row.tvl_usd, 0)) * growthF * ageF * breadthF));
+  // The fitted model, recomputed here from the shipped coefficients and the
+  // row's own figures, so the page can check the number board.json carries
+  // with the same arithmetic. log10(implied) = b0 + b1*log10(TVL) + group beta.
+  var GROUP_DUMMIES = ['LEND', 'DEX', 'YIELD', 'RWA', 'DERIV'];
+  function impliedOf(row, fit) {
+    var beta = fit.beta;
+    var logv = beta[0] + beta[1] * Math.log10(Math.max(row.tvl_usd, 1));
+    var gi = GROUP_DUMMIES.indexOf(row.group || 'OTHER');
+    if (gi >= 0) logv += beta[2 + gi];
+    logv = Math.min(14, Math.max(0, logv));
+    return Math.max(1, Math.round(Math.pow(10, logv)));
   }
 
   function readHash() {
@@ -98,19 +100,32 @@
     $('lede-text').textContent = 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) +
       'M of TVL and no token on record. The early radar adds ' + DATA.early_size +
       ' pre-token protocols below that floor, chosen by implied value. Implied value is a model, not a promise.';
-    var med = DATA.rows.length ? DATA.rows[Math.floor(DATA.rows.length / 2)].implied_value_usd : 0;
+    var med = DATA.kpis.median_implied_usd;
     $('facts').innerHTML =
-      fact('Watchlist covered', DATA.watchlist_size + ' / ' + DATA.watchlist_size) +
+      fact('Watchlist TVL', fmtUsd(DATA.kpis.watchlist_tvl_usd)) +
+      fact('Median implied value', fmtUsd(med)) +
       fact('Pre-token rows scored', String(DATA.board_size)) +
-      fact('Early rows below the floor', String(DATA.early_size)) +
-      fact('Median implied value', fmtUsd(med));
-    var m = DATA.model;
-    $('formula').textContent = 'implied = round( ' + m.scale_coefficient + ' x sqrt(tvl_usd) x clamp(1 + clamp(change_7d, ' +
-      m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ', ' + m.growth_factor_min + ', ' + m.growth_factor_max +
-      ') x (age ? ' + m.age_floor + ' + min(age_days, ' + m.age_cap_days + ') / ' + m.age_cap_days + ' x ' + m.age_range + ' : ' +
-      m.unknown_age_factor + ') x (1 + 0.02 x min(chains - 1, ' + m.breadth_max_chains + ')) )';
-    $('model-note').textContent = 'Value grows with the square root of TVL, so the market pays less for each extra dollar of TVL than for the first. ' +
-      'Growth is saturating: one wild week cannot carry a protocol. Age is the time since the protocol was first listed, the best record of how long it has run with no token. ' +
+      fact('Watchlist covered', DATA.kpis.watchlist_covered + ' / ' + DATA.kpis.watchlist_size) +
+      fact('Fitted R-squared', DATA.fit.r2_full.toFixed(2) + ' (n = ' + DATA.fit.train_n + ')') +
+      fact('Median held-out error', 'x' + Math.pow(10, DATA.fit.folds[0].med_err).toFixed(1) + ' - x' + Math.pow(10, DATA.fit.folds[1].med_err).toFixed(1));
+    var f = DATA.fit;
+    var beta = f.beta;
+    var terms = GROUP_DUMMIES.map(function (g, i) { return g + ' ' + (beta[2 + i] >= 0 ? '+' : '') + beta[2 + i].toFixed(4); }).join(', ');
+    $('formula').textContent = 'log10(implied value) = ' + beta[0].toFixed(4) + ' + ' + beta[1].toFixed(4) +
+      ' x log10(tvl_usd)' + '   |   group adjustments (OTHER = 0): ' + terms +
+      '   |   ridge lambda ' + f.lambda + ', fitted on ' + f.train_n + ' tokened protocols';
+    var foldRows = f.folds.map(function (fold) {
+      return '<tr><td>Held out, ' + esc(fold.test) + '</td><td class="num">' + fold.n_test + '</td><td class="num">' +
+        fold.r2.toFixed(2) + '</td><td class="num">x' + Math.pow(10, fold.med_err).toFixed(2) + '</td></tr>';
+    }).join('');
+    $('validation').innerHTML = '<table class="valid"><thead><tr><th>Validation</th><th>Protocols</th><th>R-squared</th><th>Median error</th></tr></thead><tbody>' +
+      '<tr><td>Full fit, all ' + f.train_n + ' tokened protocols</td><td class="num">' + f.train_n + '</td><td class="num">' +
+      f.r2_full.toFixed(2) + '</td><td class="num">x' + Math.pow(10, f.med_err_full).toFixed(2) + '</td></tr>' + foldRows + '</tbody></table>';
+    $('model-note').textContent = 'The fit is honest about its weakness: TVL and category explain about a fifth of what a token ends up worth (R-squared ' +
+      f.r2_full.toFixed(2) + '); the rest is the team, the timing and the narrative, none of which a TVL snapshot can see. ' +
+      'Seven-day growth, age and chain count were tested as extra terms and did not improve held-out error, so they are shown for context and do not move the score. ' +
+      'Expected value is the implied value times the launch prior — the share of protocols that gain a token within a year at this age, from the snapshot itself — ' +
+      'so a launch that may never come is never priced as if it will. ' +
       'The live-token protocols are set aside with their market caps shown, never ranked as launch candidates.';
     $('foot-note').textContent = 'Snapshot ' + DATA.as_of + ', ' + DATA.source +
       '. Implied values are this radar\u2019s own model claim, never a price and never a prediction that a token will be issued. ' +
@@ -201,7 +216,7 @@
     }
     empty.hidden = true;
     body.hidden = false;
-    var recomputed = impliedOf(row, DATA.model);
+    var recomputed = impliedOf(row, DATA.fit);
     var match = recomputed === row.implied_value_usd;
     var steps = (row.farm_steps || []).map(function (s) {
       var at = s.indexOf(' Cost: ');
@@ -216,15 +231,16 @@
       '<button class="close" type="button" id="detail-close" aria-label="Close details">Close</button></div>' +
       '<section class="detail-section"><h3>Implied value</h3><div class="equation">' +
       '<div><span>TVL</span><b>' + fmtUsd(row.tvl_usd) + '</b></div>' +
-      '<div><span>Seven-day growth</span><b>' + fmtPct(row.change_7d) + '</b></div>' +
-      '<div><span>Age with no token</span><b>' + fmtAge(row.age_days) + '</b></div>' +
-      '<div><span>Chains</span><b>' + (row.chains ? row.chains.length : 0) + '</b></div>' +
-      '<div><span>Growth factor</span><b>' + row.growth_factor + '</b></div>' +
-      '<div><span>Patience factor</span><b>' + row.age_factor + '</b></div>' +
-      '<div><span>Reach factor</span><b>' + row.breadth_factor + '</b></div>' +
+      '<div><span>Category group</span><b>' + esc(row.group) + ' (' + (row.group_adjustment >= 0 ? '+' : '') + row.group_adjustment.toFixed(4) + ')</b></div>' +
+      '<div><span>Fitted log10 value</span><b>' + row.log10_implied.toFixed(4) + '</b></div>' +
       '<div><span>Implied value</span><b>' + fmtUsd(row.implied_value_usd) + '</b></div>' +
-      '<div class="match">' + (match ? 'Recomputed from the snapshot figures: ' + fmtUsd(recomputed) + ' — the same number the board carries.' : 'Recomputed: ' + fmtUsd(recomputed) + ' — differs from the board; the data would be stale.') + '</div>' +
-      '</div><p class="sub">Model ' + esc(DATA.model_version) + ': the same function scores every protocol. This is an estimate, not a price.</p></section>' +
+      '<div><span>Launch prior (1 year)</span><b>' + Math.round(row.launch_prior * 100) + '%</b></div>' +
+      '<div><span>Expected value</span><b>' + fmtUsd(row.ev_usd) + '</b></div>' +
+      '<div><span>Seven-day growth (context)</span><b>' + fmtPct(row.change_7d) + '</b></div>' +
+      '<div><span>Age with no token (context)</span><b>' + fmtAge(row.age_days) + '</b></div>' +
+      '<div><span>Chains (context)</span><b>' + (row.chains ? row.chains.length : 0) + '</b></div>' +
+      '<div class="match">' + (match ? 'Recomputed from the fitted coefficients: ' + fmtUsd(recomputed) + ' — the same number the board carries.' : 'Recomputed: ' + fmtUsd(recomputed) + ' — differs from the board; the data would be stale.') + '</div>' +
+      '</div><p class="sub">Model ' + esc(DATA.model_version) + ': the same fitted function scores every protocol. Expected value is the implied value times the launch prior. This is an estimate, not a price.</p></section>' +
       '<section class="detail-section"><h3>Farm plan</h3><ol class="steps">' + steps + '</ol></section>';
     $('detail-close').addEventListener('click', function () {
       state.selected = null;
