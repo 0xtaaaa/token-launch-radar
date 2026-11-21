@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/0xtaaaa/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/0xtaaaa/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-A token launch radar: it ranks all 198 pre-token protocols in the snapshot by a fitted implied token value, and shows a concrete farm plan for each one — each plan ending in a verdict that nets its gas and fees against the expected value at the low end of the value band. Protocols whose token already trades are set aside with their market caps, never ranked as launch candidates. Every one of the snapshot's 758 protocols is accounted for: ranked, live, or excluded with a reason. Every ranked protocol names its three nearest tokened comparables, with their real market caps, and the ten highest-expected-value plans are listed as Best bets.
+A token launch radar: it ranks all 198 pre-token protocols in the snapshot by a fitted implied token value, and shows a concrete farm plan for each one — each plan ending in a verdict that nets its gas and fees against the expected value at the low end of the value band. Protocols whose token already trades are set aside with their market caps, never ranked as launch candidates. Every one of the snapshot's 758 protocols is accounted for: ranked, live, or excluded with a reason. Every ranked protocol names its three nearest tokened comparables, with their real market caps, and carries a second, independent cross-check — the median market-cap-to-TVL multiple of the five nearest comps, times its own TVL — plus low, base and high launch scenarios. The ten highest-expected-value plans are listed as Best bets, and the ranked set's TVL is broken down by chain and by category.
 
 ## The model — radar-4, a clean-comps size curve
 
@@ -21,7 +21,7 @@ Ridge lambda 10, intercept unpenalised, computed from the snapshot by `main.ts` 
 
 ## How the terms were chosen — the radar-5 search
 
-The radar-5 search scored eighteen candidates on the same 83-comp universe (leave-one-out error and both held-out folds), and adopted none of them. A candidate is adopted only if it improves leave-one-out error without worsening either held-out fold's R-squared. The closest calls fail that rule: a tighter 10–90 trim band looks better on its own comps (x2.26) but scores x2.62 with a worse first fold on the shared 83 — it was dropping the hardest comps, not predicting better — and a ridge lambda of 15 improves leave-one-out to x2.45 but gives up the first fold (0.28 against 0.31). So radar-4 stands, and the search is printed in full so the choice is checkable, not asserted.
+The radar-5 search scored nineteen candidates on the same 83-comp universe (leave-one-out error and both held-out folds), and adopted none of them. A candidate is adopted only if it improves leave-one-out error without worsening either held-out fold's R-squared. The closest calls fail that rule: a tighter 10–90 trim band looks better on its own comps (x2.26) but scores x2.62 with a worse first fold on the shared 83 — it was dropping the hardest comps, not predicting better — and a ridge lambda of 15 improves leave-one-out to x2.45 but gives up the first fold (0.28 against 0.31). The nineteenth candidate, a TVL-weighted ridge (each comp weighted by log10(TVL)), fits better in-sample (R-squared 0.38) but its leave-one-out error is far worse (x3.15) — weighting by size lets the biggest comps dominate and the small ones go unmodelled. So radar-4 stands, and the search is printed in full so the choice is checkable, not asserted.
 
 | Candidate | Comps | R-squared | Leave-one-out | Held-out R², fold 1 | Held-out R², fold 2 |
 |---|---|---|---|---|---|
@@ -41,6 +41,7 @@ The radar-5 search scored eighteen candidates on the same 83-comp universe (leav
 | ridge lambda 8 | 83 | 0.36 | x2.54 | 0.32 | 0.22 |
 | ridge lambda 15 | 83 | 0.33 | x2.45 | 0.28 | 0.24 |
 | ridge lambda 20 | 83 | 0.31 | x2.51 | 0.25 | 0.24 |
+| TVL-weighted ridge | 83 | 0.38 | x3.15 | 0.34 | 0.14 |
 | two-stage ratio model | 83 | 0.18 | x2.91 | 0.15 | 0.14 |
 | two-stage ratio + growth | 83 | 0.19 | x2.91 | 0.11 | 0.12 |
 
@@ -62,8 +63,10 @@ Launch odds are the snapshot's own one-year hazard by age — the share of proto
 - 198 rows: the whole rankable set — all 40 watchlist protocols (watchlist TVL $12.93B) plus every other rankable pre-token protocol in the snapshot.
 - Rank 1 is Sentora Curator at $68.0M implied ($18.1M expected value, $6.9M at the low end); the median row is $7.2M implied; the last row is $2.2M.
 - Each row carries a seven-step farm plan naming a concrete deposit ($50–$250 by TVL), gas by chain and a hold period in days, ending in a costed verdict.
-- Each row's detail view names its three nearest tokened comparables — same category first, then closest TVL — with their real market caps and market-cap-to-TVL ratios.
+- Each row's detail view names its three nearest tokened comparables — same category first, then closest TVL — with their real market caps and market-cap-to-TVL ratios. A second cross-check sits beside the fitted value: the median multiple of the five nearest comps times the protocol's own TVL (the median row's cross-check agrees with the fitted value, ratio 0.98; 83 of 198 rows are flagged where the peers disagree by more than 2x, in either direction).
+- Launch scenarios show the low, base and high implied value (base divided and multiplied by the leave-one-out error of x2.63, high capped at $100B) and the expected value at each end.
 - Best bets lists the ten plans with the highest expected value, each with a one-line reason.
+- A chain and category breakdown shows where the ranked set's TVL sits — Ethereum carries 57 of the 198 ranked protocols, and Risk Curators is the largest category by TVL.
 - Coverage: 758 protocols accounted for — 198 ranked, 24 live (shown at market cap), 536 excluded with a reason (392 token already trades, 128 CEX/bridge/staking products, 16 wrapped, staked or versioned products).
 
 ## Run it
