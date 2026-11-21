@@ -140,11 +140,13 @@
         '<td class="num">x' + c.loo_x.toFixed(2) + '</td>' +
         '<td class="num">' + c.folds[0].r2.toFixed(2) + '</td><td class="num">' + c.folds[1].r2.toFixed(2) + '</td></tr>';
     }).join('');
+    $('candidates-sub').textContent = (f.candidates || []).length + ' candidates, each scored on the same ' + f.train_n +
+      '-comp universe. A candidate is adopted only if it improves leave-one-out error without worsening either held-out fold\u2019s R-squared.';
     $('candidates').innerHTML = '<table class="valid cand"><thead><tr><th>Candidate</th><th>Comps</th><th>R-squared</th><th>Leave-one-out</th><th>Held-out R², fold 1</th><th>Held-out R², fold 2</th></tr></thead><tbody>' + candRows + '</tbody></table>' +
       '<p class="sub">' + esc(f.search_note || '') + ' The closest calls: a tighter 10–90 trim band looks better on its own comps (x2.26) but scores x2.62 with a worse first fold on the shared 83 — it was dropping the hardest comps, not predicting better. A ridge lambda of 15 improves leave-one-out to x2.45 but gives up the first fold (0.28 against 0.31).</p>';
     $('model-note').textContent = 'The fit is honest about its weakness: size, category and chain count explain about a third of what a token ends up worth (R-squared ' +
       f.r2_full.toFixed(2) + '); the rest is the team, the timing and the narrative, none of which a TVL snapshot can see. ' +
-      'The radar-5 search tested ' + (f.candidates || []).length + ' candidates — age and growth terms, per-category slopes, squared terms, tighter trim bands, other ridge penalties, a two-stage ratio model — and adopted none of them, because none improved leave-one-out error without worsening a held-out fold. ' +
+      'The radar-5 search tested ' + (f.candidates || []).length + ' candidates — age and growth terms, per-category slopes, squared terms, tighter trim bands, other ridge penalties, a TVL-weighted ridge, a two-stage ratio model — and adopted none of them, because none improved leave-one-out error without worsening a held-out fold. ' +
       'Launch odds are the snapshot\u2019s own one-year hazard by age, and expected value is the implied value times those odds. ' +
       'The farm verdict nets the plan\u2019s gas and fees against the expected value at the low end of the value band (implied value divided by the leave-one-out error), so a plan that only pays at the top of the band says so. ' +
       'The live-token protocols are set aside with their market caps shown, never ranked as launch candidates.';
@@ -163,15 +165,27 @@
       '<p>The value model is a ridge fit of log10(market cap) on log10(TVL), category group and log10(chain count), trained on ' + f.train_n +
       ' clean comps — tokened protocols minus exchange, bridge and staking products and versioned or wrapped names, trimmed to the 5th–95th percentile band of market-cap-to-TVL. ' +
       'The radar-5 search re-tested it against ' + (f.candidates || []).length + ' alternatives on the same ' + f.train_n + '-comp universe and kept it, because no alternative improved leave-one-out error (x' + f.loo_x.toFixed(2) +
-      ') without worsening a held-out fold. Every ranked protocol names its three nearest tokened comparables in its detail view, with their real market caps, so any implied value can be checked against actual peers.</p>' +
+      ') without worsening a held-out fold. Every ranked protocol names its three nearest tokened comparables in its detail view, with their real market caps, so any implied value can be checked against actual peers; a second cross-check — the median market-cap-to-TVL multiple of the five nearest comps, times the protocol\u2019s own TVL — sits beside the fitted value, and the launch scenarios show the low, base and high end of the band the model actually claims.</p>' +
       '<p>Launch odds are the snapshot\u2019s own one-year hazard by age; expected value is implied value times those odds; the farm verdict nets gas and fees against the low-end expected value. ' +
       'What the model cannot see: the team, the timing, the narrative, and whether a protocol ever issues a token at all. Implied values are estimates, never prices.</p>';
+    var bd = DATA.breakdown;
+    if (bd) {
+      $('breakdown-body').innerHTML =
+        '<div><h3>By main chain</h3>' + breakdownTable(bd.chains) + '</div>' +
+        '<div><h3>By category</h3>' + breakdownTable(bd.categories) + '</div>';
+    }
     $('foot-note').textContent = 'Snapshot ' + DATA.as_of + ', ' + DATA.source +
       '. Implied values are this radar\u2019s own model claim, never a price and never a prediction that a token will be issued. ' +
       'A protocol that records no token may still have one its record does not carry.';
   }
   function fact(label, value) {
     return '<div class="fact"><span>' + esc(label) + '</span><b>' + esc(value) + '</b></div>';
+  }
+  function breakdownTable(rows) {
+    return '<table class="valid"><thead><tr><th></th><th>Protocols</th><th>TVL</th><th>Share</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        return '<tr><td><b>' + esc(r.label) + '</b></td><td class="num">' + r.n + '</td><td class="num">' + fmtUsd(r.tvl_usd) + '</td><td class="num">' + Math.round(r.share * 100) + '%</td></tr>';
+      }).join('') + '</tbody></table>';
   }
 
   function renderControls() {
@@ -307,6 +321,10 @@
       '<div><span>Fitted log10 value</span><b>' + row.log10_implied.toFixed(4) + '</b></div>' +
       '<div><span>Implied value</span><b>' + fmtUsd(row.implied_value_usd) + '</b></div>' +
       '<div><span>Implied value, low end (÷ leave-one-out x' + DATA.fit.loo_x.toFixed(2) + ')</span><b>' + fmtUsd(row.implied_low_usd) + '</b></div>' +
+      '<div><span>Implied value, high end (× leave-one-out, capped $100B)</span><b>' + fmtUsd(row.implied_high_usd) + '</b></div>' +
+      '<div><span>Peer-multiple cross-check (median of 5 nearest comps × TVL)</span><b>' + fmtUsd(row.cross_value_usd) + '</b></div>' +
+      '<div><span>Cross-check ÷ fitted value</span><b>' + row.cross_ratio.toFixed(2) + 'x (median peer multiple ' + row.cross_median_ratio.toFixed(2) + 'x)</b></div>' +
+      (row.cross_note ? '<div class="match warn">' + esc(row.cross_note) + '</div>' : '<div class="match">Peers agree with the fitted value within a factor of two — the curve and the nearest names point the same way.</div>') +
       '<div><span>Launch odds (1 year)</span><b>' + Math.round(row.launch_prior * 100) + '%</b></div>' +
       '<div><span>Expected value</span><b>' + fmtUsd(row.ev_usd) + '</b></div>' +
       '<div><span>Expected value, low end</span><b>' + fmtUsd(row.ev_low_usd) + '</b></div>' +
@@ -315,6 +333,12 @@
       '<div><span>Age with no token (context)</span><b>' + fmtAge(row.age_days) + '</b></div>' +
       '<div class="match">' + (match ? 'Recomputed from the fitted coefficients: ' + fmtUsd(recomputed) + ' — the same number the board carries.' : 'Recomputed: ' + fmtUsd(recomputed) + ' — differs from the board; the data would be stale.') + '</div>' +
       '</div><p class="sub">Model ' + esc(DATA.model_version) + ': the same fitted function scores every protocol. Expected value is the implied value times the launch odds; the low end divides the implied value by the leave-one-out error first. This is an estimate, not a price.</p></section>' +
+      '<section class="detail-section"><h3>Launch scenarios</h3><p class="sub">The whole band the model claims, at ' + Math.round(row.launch_prior * 100) + '% launch odds — the low end divides by the leave-one-out error, the high end multiplies by it.</p>' +
+      '<table class="valid scen"><thead><tr><th>Scenario</th><th>Implied value</th><th>Expected value</th></tr></thead><tbody>' +
+      '<tr><td>Low</td><td class="num">' + fmtUsd(row.implied_low_usd) + '</td><td class="num">' + fmtUsd(row.ev_low_usd) + '</td></tr>' +
+      '<tr class="adopted"><td><b>Base</b> — the fitted value</td><td class="num">' + fmtUsd(row.implied_value_usd) + '</td><td class="num">' + fmtUsd(row.ev_usd) + '</td></tr>' +
+      '<tr><td>High</td><td class="num">' + fmtUsd(row.implied_high_usd) + '</td><td class="num">' + fmtUsd(row.ev_high_usd) + '</td></tr>' +
+      '</tbody></table></section>' +
       '<section class="detail-section"><h3>Nearest tokened comparables</h3><p class="sub">Same category first, then closest TVL among the ' + DATA.fit.train_n + ' clean comps. Their market caps are the market\u2019s own numbers — the peers this implied value is fitted from.</p>' +
       '<table class="valid comps"><thead><tr><th>Peer</th><th>TVL</th><th>Market cap</th><th>Mcap / TVL</th></tr></thead><tbody>' +
       (row.comps || []).map(function (c) {
