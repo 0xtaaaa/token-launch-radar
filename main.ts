@@ -72,7 +72,7 @@ function copyFiles(from: string, to: string): string[] {
 const dashFiles = copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3) {
-  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
+  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3 or 4, the board, a detail view, a filtered view and the model search\n`);
   process.exit(1);
 }
 for (const name of shots) {
@@ -97,6 +97,7 @@ const bottom = board[board.length - 1]!;
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: model radar-4, clean comps ${radar.fit.train_n}, R-squared ${radar.fit.r2_full}, leave-one-out error x${radar.fit.loo_x}\n` +
+    `token radar: radar-5 search: ${radar.fit.candidates.length} candidates, ${radar.fit.search_note}\n` +
     `token radar: rank 1 is ${top.slug} at $${top.implied_value_usd.toLocaleString('en-US')}, rank ${board.length} is ${bottom.slug} at $${bottom.implied_value_usd.toLocaleString('en-US')}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
