@@ -58,6 +58,11 @@ button { cursor: pointer; }
 
 .lede { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr); gap: var(--s6); padding: var(--s6) 0 var(--s5); }
 .lede p { color: var(--muted); max-width: 64ch; margin-top: var(--s2); }
+.integrity { margin-bottom: var(--s4); padding: var(--s3) var(--s4); }
+.integrity #integrity-body { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); align-items: baseline; font-size: 13px; color: var(--muted); }
+.integrity #integrity-body b { color: var(--ink); font-weight: 600; font-family: var(--font-num); }
+.integ-title { font-family: var(--font-num); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+.integ-limits { flex-basis: 100%; font-size: 12px; }
 .facts { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); align-content: start; }
 .fact { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: var(--s3) var(--s4); }
 .fact span { display: block; color: var(--muted); font-size: 12px; }
@@ -117,8 +122,11 @@ tbody tr.top1 td:first-child { color: var(--amber); font-weight: 700; }
 .equation .match { color: var(--green); font-size: 12px; margin-top: var(--s1); }
 .steps { margin: 0; padding-left: var(--s5); display: grid; gap: var(--s3); }
 .steps li { padding-left: var(--s1); }
+.steps li.verdict { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--s3); margin-left: calc(-1 * var(--s5)); list-style-position: inside; }
+.steps li.verdict b { font-weight: 600; }
 .steps b { display: block; font-weight: 500; }
 .cost { color: var(--muted); font-size: 12px; font-family: var(--font-num); }
+tr.cov-head td { color: var(--muted); font-size: 13px; background: var(--surface-2); }
 
 .model { margin-top: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--s3) var(--s4); }

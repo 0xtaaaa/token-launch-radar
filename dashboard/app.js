@@ -34,13 +34,15 @@
 
   // The fitted model, recomputed here from the shipped coefficients and the
   // row's own figures, so the page can check the number board.json carries
-  // with the same arithmetic. log10(implied) = b0 + b1*log10(TVL) + group beta.
-  var GROUP_DUMMIES = ['LEND', 'DEX', 'YIELD', 'RWA', 'DERIV'];
+  // with the same arithmetic. log10(implied) = b0 + b1*log10(TVL) + group beta
+  // + b5*log10(chain count). Dexs is the baseline group (no dummy).
+  var GROUP_DUMMIES = ['LEND', 'RWA', 'YIELD'];
   function impliedOf(row, fit) {
     var beta = fit.beta;
     var logv = beta[0] + beta[1] * Math.log10(Math.max(row.tvl_usd, 1));
     var gi = GROUP_DUMMIES.indexOf(row.group || 'OTHER');
     if (gi >= 0) logv += beta[2 + gi];
+    logv += beta[5] * Math.log10(Math.max((row.chains || []).length, 1));
     logv = Math.min(14, Math.max(0, logv));
     return Math.max(1, Math.round(Math.pow(10, logv)));
   }
@@ -52,13 +54,13 @@
     if (params.get('q')) state.q = params.get('q');
     if (params.get('p')) state.selected = params.get('p');
     if (params.get('category')) state.category = params.get('category');
-    if (params.get('tab') === 'live' || params.get('tab') === 'pre') state.tab = params.get('tab');
+    if (params.get('tab') === 'live' || params.get('tab') === 'pre' || params.get('tab') === 'coverage') state.tab = params.get('tab');
   }
   function writeHash() {
     var params = new URLSearchParams();
     if (state.q) params.set('q', state.q);
     if (state.category !== 'all') params.set('category', state.category);
-    if (state.tab === 'live') params.set('tab', 'live');
+    if (state.tab === 'live' || state.tab === 'coverage') params.set('tab', state.tab);
     if (state.selected) params.set('p', state.selected);
     var next = params.toString();
     if (next) window.history.replaceState(null, '', '#' + next);
@@ -107,25 +109,37 @@
       fact('Pre-token rows scored', String(DATA.board_size)) +
       fact('Watchlist covered', DATA.kpis.watchlist_covered + ' / ' + DATA.kpis.watchlist_size) +
       fact('Fitted R-squared', DATA.fit.r2_full.toFixed(2) + ' (n = ' + DATA.fit.train_n + ')') +
-      fact('Median held-out error', 'x' + Math.pow(10, DATA.fit.folds[0].med_err).toFixed(1) + ' - x' + Math.pow(10, DATA.fit.folds[1].med_err).toFixed(1));
+      fact('Leave-one-out error', 'x' + DATA.fit.loo_x.toFixed(2));
+    var integ = DATA.integrity;
+    $('integrity-body').innerHTML =
+      '<span class="integ-title">Integrity</span>' +
+      '<span>Snapshot <b>' + esc(integ.as_of) + '</b></span>' +
+      '<span>Floor <b>$' + Math.round(integ.floor_usd / 1e6) + 'M TVL</b></span>' +
+      '<span><b>' + integ.total_protocols + '</b> protocols accounted: <b>' + integ.ranked + '</b> ranked, <b>' + integ.live + '</b> live, <b>' + integ.excluded + '</b> excluded with a reason</span>' +
+      '<span>Clean comps <b>' + integ.train_n + '</b> (128 usable market caps, minus ' + integ.excluded_product_or_name + ' exchange/bridge/staking or versioned names, minus ' + integ.excluded_ratio_outliers + ' ratio outliers)</span>' +
+      '<span>Model <b>' + esc(DATA.model_version) + '</b>, leave-one-out error <b>x' + integ.loo_x.toFixed(2) + '</b></span>' +
+      '<span class="integ-limits">' + esc(integ.limits) + '</span>';
     var f = DATA.fit;
     var beta = f.beta;
     var terms = GROUP_DUMMIES.map(function (g, i) { return g + ' ' + (beta[2 + i] >= 0 ? '+' : '') + beta[2 + i].toFixed(4); }).join(', ');
     $('formula').textContent = 'log10(implied value) = ' + beta[0].toFixed(4) + ' + ' + beta[1].toFixed(4) +
-      ' x log10(tvl_usd)' + '   |   group adjustments (OTHER = 0): ' + terms +
-      '   |   ridge lambda ' + f.lambda + ', fitted on ' + f.train_n + ' tokened protocols';
+      ' x log10(tvl_usd)' + '   |   group adjustments (Dexs = 0): ' + terms +
+      '   |   chains term ' + beta[5].toFixed(4) + ' x log10(chain count)' +
+      '   |   ridge lambda ' + f.lambda + ', fitted on ' + f.train_n + ' clean comps';
     var foldRows = f.folds.map(function (fold) {
       return '<tr><td>Held out, ' + esc(fold.test) + '</td><td class="num">' + fold.n_test + '</td><td class="num">' +
         fold.r2.toFixed(2) + '</td><td class="num">x' + Math.pow(10, fold.med_err).toFixed(2) + '</td></tr>';
     }).join('');
     $('validation').innerHTML = '<table class="valid"><thead><tr><th>Validation</th><th>Protocols</th><th>R-squared</th><th>Median error</th></tr></thead><tbody>' +
-      '<tr><td>Full fit, all ' + f.train_n + ' tokened protocols</td><td class="num">' + f.train_n + '</td><td class="num">' +
-      f.r2_full.toFixed(2) + '</td><td class="num">x' + Math.pow(10, f.med_err_full).toFixed(2) + '</td></tr>' + foldRows + '</tbody></table>';
-    $('model-note').textContent = 'The fit is honest about its weakness: TVL and category explain about a fifth of what a token ends up worth (R-squared ' +
+      '<tr><td>Full fit, all ' + f.train_n + ' clean comps</td><td class="num">' + f.train_n + '</td><td class="num">' +
+      f.r2_full.toFixed(2) + '</td><td class="num">x' + Math.pow(10, f.med_err_full).toFixed(2) + '</td></tr>' +
+      '<tr><td>Leave-one-out, refit without each comp</td><td class="num">' + f.train_n + '</td><td class="num">—</td><td class="num">x' + f.loo_x.toFixed(2) + '</td></tr>' + foldRows + '</tbody></table>';
+    $('model-note').textContent = 'The fit is honest about its weakness: size, category and chain count explain about a third of what a token ends up worth (R-squared ' +
       f.r2_full.toFixed(2) + '); the rest is the team, the timing and the narrative, none of which a TVL snapshot can see. ' +
-      'Seven-day growth, age and chain count were tested as extra terms and did not improve held-out error, so they are shown for context and do not move the score. ' +
-      'Expected value is the implied value times the launch prior — the share of protocols that gain a token within a year at this age, from the snapshot itself — ' +
-      'so a launch that may never come is never priced as if it will. ' +
+      'Age and seven-day growth were tested as extra terms and dropped — neither improved leave-one-out error — and per-category slopes were rejected as unstable (a held-out fold R-squared of -2.5). ' +
+      'The chain-count term stays because it improves leave-one-out error (x2.70 without it, x' + f.loo_x.toFixed(2) + ' with it). ' +
+      'Launch odds are the snapshot\u2019s own one-year hazard by age, and expected value is the implied value times those odds. ' +
+      'The farm verdict nets the plan\u2019s gas and fees against the expected value at the low end of the value band (implied value divided by the leave-one-out error), so a plan that only pays at the top of the band says so. ' +
       'The live-token protocols are set aside with their market caps shown, never ranked as launch candidates.';
     $('foot-note').textContent = 'Snapshot ' + DATA.as_of + ', ' + DATA.source +
       '. Implied values are this radar\u2019s own model claim, never a price and never a prediction that a token will be issued. ' +
@@ -145,6 +159,7 @@
     if (q.value !== state.q) q.value = state.q;
     $('tab-pre').setAttribute('aria-pressed', state.tab === 'pre' ? 'true' : 'false');
     $('tab-live').setAttribute('aria-pressed', state.tab === 'live' ? 'true' : 'false');
+    $('tab-coverage').setAttribute('aria-pressed', state.tab === 'coverage' ? 'true' : 'false');
   }
 
   function rowHtml(r, max) {
@@ -171,6 +186,36 @@
       var key = btn.getAttribute('data-sort');
       btn.innerHTML = btn.textContent.replace(/ [v^]$/, '') + (state.sort === key ? ' <span class="arrow" aria-hidden="true">' + (state.dir < 0 ? 'v' : '^') + '</span>' : '');
     });
+    if (state.tab === 'coverage') {
+      caption.textContent = 'Coverage: every protocol in the snapshot is accounted for — ranked, live, or excluded with a reason.';
+      var q = state.q.trim().toLowerCase();
+      var acc = DATA.accounting.filter(function (a) {
+        if (!q) return true;
+        var hay = [a.name, a.slug, a.category, a.reason, a.status].join(' ').toLowerCase();
+        return hay.indexOf(q) >= 0;
+      });
+      var cov = DATA.coverage;
+      if (acc.length === 0) {
+        body.innerHTML = '';
+        empty.hidden = false;
+        $('count').textContent = '0 of ' + DATA.accounting.length + ' set-aside protocols';
+        return;
+      }
+      empty.hidden = true;
+      body.innerHTML = '<tr class="cov-head"><td colspan="7"><b>' + cov.total + ' protocols in the snapshot</b> — ' + cov.ranked + ' ranked, ' +
+        cov.live + ' live, ' + cov.excluded + ' excluded. Excluded by reason: ' +
+        cov.by_reason.map(function (r) { return esc(r.reason) + ' ' + r.n; }).join(' · ') + '</td></tr>' +
+        acc.map(function (a) {
+          return '<tr data-slug="' + esc(a.slug) + '" tabindex="0"><td class="num">—</td>' +
+            '<td><div class="name"><b>' + esc(a.name) + '</b><span class="slug">' + esc(a.slug) + '</span>' +
+            '<span class="sub">' + esc(a.category || 'Other') + '</span></div></td>' +
+            '<td class="num">—</td><td class="num">—</td><td class="num">—</td>' +
+            '<td class="num">—</td>' +
+            '<td><span class="status' + (a.status === 'live' ? ' live' : '') + '">' + esc(a.reason) + '</span></td></tr>';
+        }).join('');
+      $('count').textContent = acc.length + ' of ' + DATA.accounting.length + ' set-aside protocols';
+      return;
+    }
     if (state.tab === 'live') {
       caption.textContent = 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking.';
       var live = DATA.live.slice().sort(function (a, b) { return (b.mcap_usd || 0) - (a.mcap_usd || 0); });
@@ -222,7 +267,8 @@
       var at = s.indexOf(' Cost: ');
       var action = at >= 0 ? s.slice(0, at) : s;
       var tail = at >= 0 ? s.slice(at + 1) : '';
-      return '<li><b>' + esc(action) + '</b><span class="cost">' + esc(tail) + '</span></li>';
+      var verdict = action.indexOf('Verdict:') === 0 ? ' class="verdict"' : '';
+      return '<li' + verdict + '><b>' + esc(action) + '</b><span class="cost">' + esc(tail) + '</span></li>';
     }).join('');
     body.innerHTML =
       '<div class="detail-head"><div><span class="rankline">RANK ' + row.rank + ' OF ' + DATA.board_size + '</span>' +
@@ -232,15 +278,18 @@
       '<section class="detail-section"><h3>Implied value</h3><div class="equation">' +
       '<div><span>TVL</span><b>' + fmtUsd(row.tvl_usd) + '</b></div>' +
       '<div><span>Category group</span><b>' + esc(row.group) + ' (' + (row.group_adjustment >= 0 ? '+' : '') + row.group_adjustment.toFixed(4) + ')</b></div>' +
+      '<div><span>Chain-count term</span><b>' + (row.chains_term >= 0 ? '+' : '') + row.chains_term.toFixed(4) + ' (' + (row.chains ? row.chains.length : 0) + ' chains)</b></div>' +
       '<div><span>Fitted log10 value</span><b>' + row.log10_implied.toFixed(4) + '</b></div>' +
       '<div><span>Implied value</span><b>' + fmtUsd(row.implied_value_usd) + '</b></div>' +
-      '<div><span>Launch prior (1 year)</span><b>' + Math.round(row.launch_prior * 100) + '%</b></div>' +
+      '<div><span>Implied value, low end (÷ leave-one-out x' + DATA.fit.loo_x.toFixed(2) + ')</span><b>' + fmtUsd(row.implied_low_usd) + '</b></div>' +
+      '<div><span>Launch odds (1 year)</span><b>' + Math.round(row.launch_prior * 100) + '%</b></div>' +
       '<div><span>Expected value</span><b>' + fmtUsd(row.ev_usd) + '</b></div>' +
+      '<div><span>Expected value, low end</span><b>' + fmtUsd(row.ev_low_usd) + '</b></div>' +
+      '<div><span>Farm net cost</span><b>' + fmtUsd(row.net_cost_usd) + '</b></div>' +
       '<div><span>Seven-day growth (context)</span><b>' + fmtPct(row.change_7d) + '</b></div>' +
       '<div><span>Age with no token (context)</span><b>' + fmtAge(row.age_days) + '</b></div>' +
-      '<div><span>Chains (context)</span><b>' + (row.chains ? row.chains.length : 0) + '</b></div>' +
       '<div class="match">' + (match ? 'Recomputed from the fitted coefficients: ' + fmtUsd(recomputed) + ' — the same number the board carries.' : 'Recomputed: ' + fmtUsd(recomputed) + ' — differs from the board; the data would be stale.') + '</div>' +
-      '</div><p class="sub">Model ' + esc(DATA.model_version) + ': the same fitted function scores every protocol. Expected value is the implied value times the launch prior. This is an estimate, not a price.</p></section>' +
+      '</div><p class="sub">Model ' + esc(DATA.model_version) + ': the same fitted function scores every protocol. Expected value is the implied value times the launch odds; the low end divides the implied value by the leave-one-out error first. This is an estimate, not a price.</p></section>' +
       '<section class="detail-section"><h3>Farm plan</h3><ol class="steps">' + steps + '</ol></section>';
     $('detail-close').addEventListener('click', function () {
       state.selected = null;
@@ -277,6 +326,7 @@
   $('category').addEventListener('change', function (e) { state.category = e.target.value; writeHash(); render(); });
   $('tab-pre').addEventListener('click', function () { state.tab = 'pre'; state.selected = null; writeHash(); render(); });
   $('tab-live').addEventListener('click', function () { state.tab = 'live'; state.selected = null; writeHash(); render(); });
+  $('tab-coverage').addEventListener('click', function () { state.tab = 'coverage'; state.selected = null; writeHash(); render(); });
   $('clear-filters').addEventListener('click', function () { state.q = ''; state.category = 'all'; writeHash(); render(); });
   $('board-body').addEventListener('click', function (e) {
     var tr = e.target.closest ? e.target.closest('tr[data-slug]') : null;

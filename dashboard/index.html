@@ -28,6 +28,10 @@
     <div class="facts" id="facts"></div>
   </section>
 
+  <section class="panel integrity" id="integrity" aria-label="Integrity strip">
+    <div id="integrity-body"></div>
+  </section>
+
   <section class="controls" aria-label="Board controls">
     <div class="field">
       <label for="q">Search</label>
@@ -42,6 +46,7 @@
       <div class="tabs" role="group" aria-label="Token status">
         <button type="button" id="tab-pre" aria-pressed="true">Pre-token</button>
         <button type="button" id="tab-live" aria-pressed="false">Already trading</button>
+        <button type="button" id="tab-coverage" aria-pressed="false">Coverage</button>
       </div>
     </div>
     <span class="count" id="count"></span>
@@ -83,7 +88,7 @@
   </div>
 
   <section class="panel model" id="model-panel">
-    <h2>How implied value is fitted — model radar-3</h2>
+    <h2>How implied value is fitted — model radar-4</h2>
     <p class="sub">The coefficients come from the snapshot's own tokened protocols, not from a hand-tuned rule. No name is special-cased, and no row is hand-picked.</p>
     <div class="formula" id="formula"></div>
     <div id="validation"></div>

@@ -1,4 +1,4 @@
-// Token Launch Radar — model radar-3 (fitted).
+// Token Launch Radar — model radar-4 (clean-comps size curve).
 //
 // One snapshot of the protocol universe in, one ranked board out. The board ranks
 // pre-token protocols only: a protocol is pre-token when its snapshot record carries
@@ -11,25 +11,37 @@
 // plus every other rankable pre-token protocol in the snapshot, strongest implied
 // value first.
 //
-// Implied value is FITTED, not hand-tuned. The snapshot's own tokened protocols
-// are the training set: log10(market cap) is regressed on log10(TVL) and the
-// protocol's category group, by ridge least squares (lambda 1, intercept
-// unpenalised), computed from the snapshot at run time — never from a hardcoded
-// list of names or values. The same function scores every row.
+// Implied value is FITTED from clean comps, not hand-tuned. The training set is
+// the snapshot's tokened protocols cleaned in two steps: first, exchange, bridge
+// and staking products and versioned, wrapped or exchange-named protocols are
+// removed (they are not the kind of protocol the board ranks); then the
+// market-cap-to-TVL ratio is trimmed to its 5th–95th percentile band, which
+// removes nine protocols whose tokens trade at a ratio no peer supports. What
+// remains is 83 clean comps. log10(market cap) is regressed on log10(TVL), the
+// protocol's category group (Lending, RWA, Yield against a Dexs baseline) and
+// log10(chain count), by ridge least squares (lambda 10, intercept unpenalised),
+// computed from the snapshot at run time — never from a hardcoded list of names
+// or values. The same function scores every row.
 //
-// The fit is weak, and the board says so. TVL explains about a fifth of launch
-// value (in-sample R-squared about 0.19); the rest is idiosyncratic — the team,
-// the timing, the narrative — none of which a TVL snapshot can see. Growth,
-// age and chain count were tested as extra terms and did not improve held-out
-// error, so they are shown for context and do not move the score. The ranking is
-// a prior, not a price, and the dashboard prints the held-out validation beside
-// the formula so the weakness is visible, not hidden.
+// The terms were chosen by leave-one-out error, not by taste. Age (from
+// listed_at) and seven-day growth were tested and dropped: neither improved
+// leave-one-out error. Per-category slopes were tested and rejected: they are
+// unstable, with a held-out fold R-squared of -2.5. The chain-count term stays
+// because it improves leave-one-out error (x2.70 without it, x2.58 with it).
+//
+// The fit is still weak, and the board says so. Size and category explain about
+// a third of what a token ends up worth (in-sample R-squared about 0.34); the
+// rest is idiosyncratic — the team, the timing, the narrative — none of which a
+// TVL snapshot can see. The dashboard prints the leave-one-out error and both
+// held-out folds beside the formula so the weakness is visible, not hidden.
 //
 // Expected value: a launch is worth the implied value only if a token appears.
-// The launch prior is the snapshot's own one-year hazard by age: the share of
+// The launch odds are the snapshot's own one-year hazard by age: the share of
 // protocols that record a token between one age bucket and the next, floored at
-// 5% and capped at 60%. EV is implied value times that prior. It is a
-// cross-sectional rate, not a forecast.
+// 5% and capped at 60%. EV is implied value times those odds. The farm verdict
+// goes one step further: it nets the plan's gas and fees against the expected
+// value at the LOW end of the value band (implied value divided by the
+// leave-one-out error), so a plan that only pays at the top of the band says so.
 //
 // A token's implied value is a model claim, never a price and never a prediction
 // that a token will be issued.
@@ -58,28 +70,34 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
-/** The ridge penalty of the fit: 1.0, on every term but the intercept. */
-export const FIT_LAMBDA = 1;
+/** The ridge penalty of the fit: 10, on every term but the intercept. */
+export const FIT_LAMBDA = 10;
 
-/** Category groups the fit scores: anything unmapped is the OTHER baseline. */
+/** Category groups the fit scores: Lending, RWA and Yield against a Dexs baseline; anything else is OTHER. */
 const GROUP_OF: Record<string, string> = {
   Lending: 'LEND',
-  Dexs: 'DEX',
-  Yield: 'YIELD',
   RWA: 'RWA',
+  Yield: 'YIELD',
   'Yield Aggregator': 'YIELD',
-  'Leveraged Farming': 'DEX',
-  Derivatives: 'DERIV',
-  Perpetuals: 'DERIV',
-  Options: 'DERIV',
+  Dexs: 'DEX',
 };
 
 /** The group dummies, in feature order after the intercept and log10(TVL). */
-export const GROUP_DUMMIES = ['LEND', 'DEX', 'YIELD', 'RWA', 'DERIV'];
+export const GROUP_DUMMIES = ['LEND', 'RWA', 'YIELD'];
 
-/** The fitted model, with its held-out validation, for the dashboard and README. */
+/** How the clean training set was built, for the integrity strip. */
+export interface CleanSet {
+  n_with_mcap: number;
+  n_product_or_name: number;
+  n_ratio_outliers: number;
+  ratio_band_lo: number;
+  ratio_band_hi: number;
+  train_n: number;
+}
+
+/** The fitted model, with its leave-one-out and held-out validation, for the dashboard and README. */
 export interface FitResult {
   features: string[];
   beta: number[];
@@ -87,7 +105,10 @@ export interface FitResult {
   train_n: number;
   r2_full: number;
   med_err_full: number;
+  loo_med_err: number;
+  loo_x: number;
   folds: { test: string; n_test: number; r2: number; med_err: number }[];
+  clean: CleanSet;
 }
 
 /** One age bucket of the launch prior, and the hazard it implies. */
@@ -133,14 +154,20 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  implied_low_usd: number;
   ev_usd: number;
+  ev_low_usd: number;
+  net_cost_usd: number;
   launch_prior: number;
   group: string;
   model: {
     log10_implied: number;
     group_adjustment: number;
+    chains_term: number;
     launch_prior: number;
     ev_usd: number;
+    ev_low_usd: number;
+    net_cost_usd: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -159,11 +186,15 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  implied_low_usd: number;
   ev_usd: number;
+  ev_low_usd: number;
+  net_cost_usd: number;
   launch_prior: number;
   group: string;
   log10_implied: number;
   group_adjustment: number;
+  chains_term: number;
   farm_steps: string[];
 }
 
@@ -178,6 +209,41 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
+/** One protocol the board does not rank, with the reason it is set aside. */
+export interface AccountingRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  status: 'live' | 'excluded';
+  reason: string;
+}
+
+/** How the snapshot's 758 protocols are accounted for. */
+export interface Coverage {
+  total: number;
+  ranked: number;
+  live: number;
+  excluded: number;
+  by_reason: { reason: string; n: number }[];
+}
+
+/** The integrity strip: what the snapshot is, what trained the model, and what the model cannot do. */
+export interface Integrity {
+  as_of: string;
+  floor_usd: number;
+  total_protocols: number;
+  ranked: number;
+  live: number;
+  excluded: number;
+  train_n: number;
+  excluded_product_or_name: number;
+  excluded_ratio_outliers: number;
+  ratio_band: [number, number];
+  loo_x: number;
+  r2_full: number;
+  limits: string;
+}
+
 /** Board-level indicators for the dashboard's KPI strip. */
 export interface Kpis {
   watchlist_tvl_usd: number;
@@ -189,7 +255,7 @@ export interface Kpis {
   train_n: number;
 }
 
-/** Everything the dashboard needs: the board, the live set, and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, the accounting, and the model it runs. */
 export interface RadarData {
   as_of: string;
   source: string;
@@ -197,6 +263,8 @@ export interface RadarData {
   fit: FitResult;
   launch_prior: LaunchPrior;
   kpis: Kpis;
+  coverage: Coverage;
+  integrity: Integrity;
   model_version: string;
   watchlist_size: number;
   board_size: number;
@@ -204,6 +272,7 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  accounting: AccountingRow[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -236,11 +305,12 @@ export function categoryGroup(category: string | null): string {
   return GROUP_OF[category] ?? 'OTHER';
 }
 
-/** The fit's feature row for one protocol: intercept, log10(TVL), group dummies. */
+/** The fit's feature row for one protocol: intercept, log10(TVL), group dummies, log10(chain count). */
 function features(p: SnapshotProtocol): number[] {
   const g = categoryGroup(p.category);
   const row: number[] = [1, Math.log10(Math.max(p.tvl_usd, 1))];
   for (const d of GROUP_DUMMIES) row.push(g === d ? 1 : 0);
+  row.push(Math.log10(Math.max(p.chains.length, 1)));
   return row;
 }
 
@@ -295,6 +365,21 @@ function fitQuality(X: number[][], y: number[], beta: number[]): { r2: number; m
   return { r2: ssTot === 0 ? 0 : 1 - ssRes / ssTot, medErr: med };
 }
 
+/** Leave-one-out median absolute log10 error: refit without each comp in turn. */
+function looMedErr(train: SnapshotProtocol[], lambda: number): number {
+  const errs: number[] = [];
+  for (let i = 0; i < train.length; i++) {
+    const rest = train.filter((_, j) => j !== i);
+    const beta = ridgeSolve(rest.map(features), rest.map((p) => Math.log10(p.mcap_usd!)), lambda);
+    const pred = features(train[i]!).reduce((s, v, k) => s + v * beta[k]!, 0);
+    errs.push(Math.abs(pred - Math.log10(train[i]!.mcap_usd!)));
+  }
+  const sorted = [...errs].sort((a, b) => a - b);
+  return sorted.length % 2 === 1
+    ? sorted[(sorted.length - 1) / 2]!
+    : (sorted[sorted.length / 2 - 1]! + sorted[sorted.length / 2]!) / 2;
+}
+
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -345,19 +430,46 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 }
 
 /**
- * The fitted model: ridge least squares of log10(market cap) on log10(TVL) and
- * the category group, trained on the snapshot's tokened protocols, with two
- * held-out folds (every fifth protocol by slug, test sets i%5 in {0,1} and {2,3}).
- * Deterministic: the training set is slug-sorted and the solver pivots the same way.
- * The beta is rounded to four decimals before anything uses it, so the dashboard's
- * recompute from the shipped coefficients matches the board exactly.
+ * The clean training set: the trainable tokened protocols, trimmed to the
+ * 5th–95th percentile band of log10(market cap / TVL). Deterministic: the band
+ * is computed from the slug-sorted trainable set.
+ */
+export function cleanTrainingSet(snapshot: Snapshot): { clean: SnapshotProtocol[]; cleanSet: CleanSet } {
+  const trainable = snapshot.protocols.filter(isTrainable).sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const ratios = trainable.map((p) => Math.log10(p.mcap_usd! / p.tvl_usd)).sort((a, b) => a - b);
+  const lo = ratios[Math.floor(0.05 * ratios.length)]!;
+  const hi = ratios[Math.floor(0.95 * ratios.length) - 1]!;
+  const clean = trainable.filter((p) => {
+    const r = Math.log10(p.mcap_usd! / p.tvl_usd);
+    return r >= lo && r <= hi;
+  });
+  const cleanSet: CleanSet = {
+    n_with_mcap: snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0).length,
+    n_product_or_name: trainable.length === 0 ? 0 : snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0).length - trainable.length,
+    n_ratio_outliers: trainable.length - clean.length,
+    ratio_band_lo: round4(lo),
+    ratio_band_hi: round4(hi),
+    train_n: clean.length,
+  };
+  return { clean, cleanSet };
+}
+
+/**
+ * The fitted model: ridge least squares of log10(market cap) on log10(TVL),
+ * the category group and log10(chain count), trained on the clean comps, with
+ * leave-one-out error and two held-out folds (every fifth protocol by slug,
+ * test sets i%5 in {0,1} and {2,3}). Deterministic: the training set is
+ * slug-sorted and the solver pivots the same way. The beta is rounded to four
+ * decimals before anything uses it, so the dashboard's recompute from the
+ * shipped coefficients matches the board exactly.
  */
 export function fitModel(snapshot: Snapshot): FitResult {
-  const train = snapshot.protocols.filter(isTrainable).sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const { clean: train, cleanSet } = cleanTrainingSet(snapshot);
   const X = train.map(features);
   const y = train.map((p) => Math.log10(p.mcap_usd!));
   const beta = ridgeSolve(X, y, FIT_LAMBDA).map(round4);
   const full = fitQuality(X, y, beta);
+  const loo = looMedErr(train, FIT_LAMBDA);
   const folds: FitResult['folds'] = [];
   for (const testRes of [[0, 1], [2, 3]]) {
     const tr = train.filter((_, i) => !testRes.includes(i % 5));
@@ -367,13 +479,16 @@ export function fitModel(snapshot: Snapshot): FitResult {
     folds.push({ test: `i%5 in {${testRes.join(',')}}`, n_test: te.length, r2: round4(q.r2), med_err: round4(q.medErr) });
   }
   return {
-    features: ['intercept', 'log10_tvl', ...GROUP_DUMMIES],
+    features: ['intercept', 'log10_tvl', ...GROUP_DUMMIES, 'log10_chains'],
     beta,
     lambda: FIT_LAMBDA,
     train_n: train.length,
     r2_full: round4(full.r2),
     med_err_full: round4(full.medErr),
+    loo_med_err: round4(loo),
+    loo_x: round4(10 ** loo),
     folds,
+    clean: cleanSet,
   };
 }
 
@@ -437,13 +552,14 @@ export function logImplied(p: SnapshotProtocol, beta: number[]): number {
 }
 
 /** The fitted implied value: 10 to the fitted log value, whole dollars, capped at the gate's ceiling. */
-export function impliedValue(p: SnapshotProtocol, beta: number[]): { implied: number; log10: number; groupAdj: number } {
+export function impliedValue(p: SnapshotProtocol, beta: number[]): { implied: number; log10: number; groupAdj: number; chainsTerm: number } {
   const log10 = Math.min(14, Math.max(0, logImplied(p, beta)));
   const implied = Math.max(1, Math.round(10 ** log10));
   const g = categoryGroup(p.category);
   const di = GROUP_DUMMIES.indexOf(g);
   const groupAdj = di >= 0 ? beta[2 + di]! : 0;
-  return { implied, log10: round4(log10), groupAdj: round4(groupAdj) };
+  const chainsTerm = round4(beta[5]! * Math.log10(Math.max(p.chains.length, 1)));
+  return { implied, log10: round4(log10), groupAdj: round4(groupAdj), chainsTerm };
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
@@ -467,7 +583,12 @@ export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrio
     const v = impliedValue(p, fit.beta);
     const age = ageDays(snapshot.as_of, p.listed_at);
     const launch = hazardFor(age, prior);
-    return { p, ...v, age, launch, ev: Math.max(1, Math.round(v.implied * launch)) };
+    const impliedLow = Math.max(1, Math.round(v.implied / fit.loo_x));
+    const ev = Math.max(1, Math.round(v.implied * launch));
+    const evLow = Math.max(1, Math.round(impliedLow * launch));
+    const plan = farmSteps(p, age, { implied: v.implied, odds: launch, looX: fit.loo_x });
+    const netCost = plan.net_cost_usd;
+    return { p, ...v, age, launch, ev, evLow, impliedLow, netCost, plan };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -485,17 +606,23 @@ export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrio
     token_status: 'pre-token',
     age_days: s.age,
     implied_value_usd: s.implied,
+    implied_low_usd: s.impliedLow,
     ev_usd: s.ev,
+    ev_low_usd: s.evLow,
+    net_cost_usd: s.netCost,
     launch_prior: s.launch,
     group: categoryGroup(s.p.category),
     model: {
       log10_implied: s.log10,
       group_adjustment: s.groupAdj,
+      chains_term: s.chainsTerm,
       launch_prior: s.launch,
       ev_usd: s.ev,
+      ev_low_usd: s.evLow,
+      net_cost_usd: s.netCost,
       age_days: s.age,
     },
-    farm_steps: farmSteps(s.p, s.age).map(stepText),
+    farm_steps: s.plan.steps.map(stepText),
   }));
 }
 
@@ -594,18 +721,42 @@ function weeklyFor(p: SnapshotProtocol): string {
   return 'a deposit, a swap or a vote';
 }
 
+/** What one farm plan costs all-in, and what it is worth at the low end of the value band. */
+export interface FarmVerdict {
+  steps: FarmStep[];
+  net_cost_usd: number;
+  ev_low_usd: number;
+}
+
 /**
  * A protocol's farm plan: six steps, each an action with a concrete dollar
- * amount and a duration. The plan is derived from the protocol's own record
- * (category, chains, TVL, age), never from a hand-written list of names.
+ * amount and a duration, plus a seventh step — the verdict — that nets the
+ * plan's gas and fees against the expected value at the LOW end of the value
+ * band (implied value divided by the leave-one-out error, times the launch
+ * odds). The plan is derived from the protocol's own record (category, chains,
+ * TVL, age), never from a hand-written list of names.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function farmSteps(
+  p: SnapshotProtocol,
+  age: number | null,
+  verdict: { implied: number; odds: number; looX: number },
+): FarmVerdict {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const gas = gasFor(chain);
   const hold = holdDaysFor(age);
   const weekly = weeklyFor(p);
-  return [
+  const weeks = Math.ceil(hold / 7);
+  const gasTotal = gas * 2 + gas * weeks + gas;
+  const fees = Math.max(1, Math.round(capital * 0.01));
+  const netCost = gasTotal + fees;
+  const impliedLow = Math.max(1, Math.round(verdict.implied / verdict.looX));
+  const evLow = Math.max(1, Math.round(impliedLow * verdict.odds));
+  const netLow = evLow - netCost;
+  const verdictText = netLow >= 0
+    ? `Verdict: $${capital} in, about $${netCost} of gas and fees over ${hold} days, net cost about $${netCost}. At the low end of the value band the launch is worth $${impliedLow.toLocaleString('en-US')} at ${Math.round(verdict.odds * 100)}% odds, so the plan nets about $${netLow.toLocaleString('en-US')} if a token launches.`
+    : `Verdict: $${capital} in, about $${netCost} of gas and fees over ${hold} days, net cost about $${netCost}. At the low end of the value band the launch is worth $${impliedLow.toLocaleString('en-US')} at ${Math.round(verdict.odds * 100)}% odds, so the plan nets about -$${Math.abs(netLow).toLocaleString('en-US')} there — it only pays if the launch lands above the low end.`;
+  const steps: FarmStep[] = [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and fund it with $${capital} plus about $${gas} of gas on ${chain}; keep its seed phrase offline on paper.`,
       cost: `$${capital + gas} to fund the wallet`,
@@ -618,8 +769,8 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
     },
     {
       text: `Do one qualifying action each week — ${weekly} — so the wallet shows steady use instead of one burst, for all ${hold} days of the hold.`,
-      cost: `about $${gas} of gas a week, $${gas * Math.ceil(hold / 7)} across the hold`,
-      time: `10 minutes a week for ${Math.ceil(hold / 7)} weeks`,
+      cost: `about $${gas} of gas a week, $${gas * weeks} across the hold`,
+      time: `10 minutes a week for ${weeks} weeks`,
     },
     {
       text: `Hold the $${capital} position for at least ${hold} days so the activity is counted in more than one snapshot.`,
@@ -636,7 +787,13 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'nothing but the log',
       time: '5 minutes',
     },
+    {
+      text: verdictText,
+      cost: `about $${netCost} net (gas $${gasTotal} + fees $${fees})`,
+      time: `${hold} days`,
+    },
   ];
+  return { steps, net_cost_usd: netCost, ev_low_usd: evLow };
 }
 
 /** The live-token protocols, by market cap, for the dashboard's Live view. */
@@ -656,6 +813,44 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
     }));
 }
 
+/** Why one protocol is not on the board: the short reason the coverage view shows. */
+export function exclusionReason(p: SnapshotProtocol): string {
+  if (!isPreToken(p)) return 'Token already trades';
+  if (p.category !== null && PRODUCT_CATEGORIES.has(p.category)) return 'CEX, bridge or staking product';
+  if (VERSIONED.test(p.name) || WRAPPED_WORD.test(p.name) || EXCHANGE_START.test(p.name)) {
+    return 'Wrapped, staked or versioned product';
+  }
+  return 'Below the rankable rules';
+}
+
+/** Every protocol the board does not rank: the live set and the excluded, each with its reason. */
+export function buildAccounting(snapshot: Snapshot, board: BoardRow[], live: LiveRow[]): { accounting: AccountingRow[]; coverage: Coverage } {
+  const boardSlugs = new Set(board.map((r) => r.slug));
+  const liveSlugs = new Set(live.map((r) => r.slug));
+  const accounting: AccountingRow[] = [];
+  for (const p of snapshot.protocols) {
+    if (boardSlugs.has(p.slug)) continue;
+    if (liveSlugs.has(p.slug)) {
+      accounting.push({ slug: p.slug, name: p.name, category: p.category, status: 'live', reason: 'Token already trades — shown at its market cap' });
+    } else {
+      accounting.push({ slug: p.slug, name: p.name, category: p.category, status: 'excluded', reason: exclusionReason(p) });
+    }
+  }
+  accounting.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const byReason = new Map<string, number>();
+  for (const a of accounting) {
+    if (a.status === 'excluded') byReason.set(a.reason, (byReason.get(a.reason) ?? 0) + 1);
+  }
+  const coverage: Coverage = {
+    total: snapshot.protocols.length,
+    ranked: board.length,
+    live: live.length,
+    excluded: accounting.filter((a) => a.status === 'excluded').length,
+    by_reason: [...byReason.entries()].map(([reason, n]) => ({ reason, n })).sort((a, b) => b.n - a.n),
+  };
+  return { accounting, coverage };
+}
+
 /** A board row's compact form for data.js. */
 export function radarRow(row: BoardRow): RadarRow {
   return {
@@ -670,11 +865,15 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    implied_low_usd: row.implied_low_usd,
     ev_usd: row.ev_usd,
+    ev_low_usd: row.ev_low_usd,
+    net_cost_usd: row.net_cost_usd,
     launch_prior: row.launch_prior,
     group: row.group,
     log10_implied: row.model.log10_implied,
     group_adjustment: row.model.group_adjustment,
+    chains_term: row.model.chains_term,
     farm_steps: row.farm_steps,
   };
 }
@@ -685,6 +884,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const prior = launchPrior(snapshot);
   const board = buildBoard(snapshot, fit, prior);
   const live = liveRows(snapshot);
+  const { accounting, coverage } = buildAccounting(snapshot, board, live);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const sortedVals = board.map((r) => r.implied_value_usd).sort((a, b) => a - b);
   const median = sortedVals.length % 2 === 1
@@ -708,6 +908,22 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       top_implied_usd: board.length > 0 ? board[0]!.implied_value_usd : 0,
       train_n: fit.train_n,
     },
+    coverage,
+    integrity: {
+      as_of: snapshot.as_of,
+      floor_usd: snapshot.floor_usd,
+      total_protocols: snapshot.protocols.length,
+      ranked: board.length,
+      live: live.length,
+      excluded: coverage.excluded,
+      train_n: fit.train_n,
+      excluded_product_or_name: fit.clean.n_product_or_name,
+      excluded_ratio_outliers: fit.clean.n_ratio_outliers,
+      ratio_band: [fit.clean.ratio_band_lo, fit.clean.ratio_band_hi],
+      loo_x: fit.loo_x,
+      r2_full: fit.r2_full,
+      limits: 'Size and category explain about a third of launch value; the rest is the team, the timing and the narrative, which no TVL snapshot can see.',
+    },
     model_version: MODEL_VERSION,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
@@ -715,6 +931,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     live_size: live.length,
     rows: board.map(radarRow),
     live,
+    accounting,
   };
   return { board, radar };
 }
