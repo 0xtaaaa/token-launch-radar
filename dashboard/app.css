@@ -134,6 +134,13 @@ tr.cov-head td { color: var(--muted); font-size: 13px; background: var(--surface
 .valid th, .valid td { padding: var(--s2) var(--s3); border-bottom: 1px solid var(--border); text-align: left; }
 .valid th { color: var(--muted); font-size: 12px; font-weight: 500; background: none; }
 .valid td.num { font-family: var(--font-num); }
+.valid tr.adopted td { background: rgba(45, 212, 191, 0.08); }
+.valid tr.adopted td:first-child b { color: var(--accent); }
+.valid.comps td, .valid.comps th { font-size: 12px; }
+.valid.bets td .slug { display: block; }
+.method { margin-top: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
+.method h2 + .sub { margin-top: calc(var(--s3) * -1); }
+.method p { margin: 0; max-width: 100ch; line-height: 1.55; }
 .foot { margin-top: var(--s5); color: var(--muted); font-size: 12px; max-width: 72ch; }
 .empty { padding: var(--s7) var(--s5); text-align: center; display: grid; gap: var(--s3); justify-items: center; }
 .empty p { color: var(--muted); }

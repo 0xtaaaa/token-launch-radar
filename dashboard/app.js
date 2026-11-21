@@ -134,13 +134,38 @@
       '<tr><td>Full fit, all ' + f.train_n + ' clean comps</td><td class="num">' + f.train_n + '</td><td class="num">' +
       f.r2_full.toFixed(2) + '</td><td class="num">x' + Math.pow(10, f.med_err_full).toFixed(2) + '</td></tr>' +
       '<tr><td>Leave-one-out, refit without each comp</td><td class="num">' + f.train_n + '</td><td class="num">—</td><td class="num">x' + f.loo_x.toFixed(2) + '</td></tr>' + foldRows + '</tbody></table>';
+    var candRows = (f.candidates || []).map(function (c) {
+      return '<tr' + (c.adopted ? ' class="adopted"' : '') + '><td>' + esc(c.name) + (c.adopted ? ' <b>adopted</b>' : '') + '</td>' +
+        '<td class="num">' + c.train_n + '</td><td class="num">' + c.r2_full.toFixed(2) + '</td>' +
+        '<td class="num">x' + c.loo_x.toFixed(2) + '</td>' +
+        '<td class="num">' + c.folds[0].r2.toFixed(2) + '</td><td class="num">' + c.folds[1].r2.toFixed(2) + '</td></tr>';
+    }).join('');
+    $('candidates').innerHTML = '<table class="valid cand"><thead><tr><th>Candidate</th><th>Comps</th><th>R-squared</th><th>Leave-one-out</th><th>Held-out R², fold 1</th><th>Held-out R², fold 2</th></tr></thead><tbody>' + candRows + '</tbody></table>' +
+      '<p class="sub">' + esc(f.search_note || '') + ' The closest calls: a tighter 10–90 trim band looks better on its own comps (x2.26) but scores x2.62 with a worse first fold on the shared 83 — it was dropping the hardest comps, not predicting better. A ridge lambda of 15 improves leave-one-out to x2.45 but gives up the first fold (0.28 against 0.31).</p>';
     $('model-note').textContent = 'The fit is honest about its weakness: size, category and chain count explain about a third of what a token ends up worth (R-squared ' +
       f.r2_full.toFixed(2) + '); the rest is the team, the timing and the narrative, none of which a TVL snapshot can see. ' +
-      'Age and seven-day growth were tested as extra terms and dropped — neither improved leave-one-out error — and per-category slopes were rejected as unstable (a held-out fold R-squared of -2.5). ' +
-      'The chain-count term stays because it improves leave-one-out error (x2.70 without it, x' + f.loo_x.toFixed(2) + ' with it). ' +
+      'The radar-5 search tested ' + (f.candidates || []).length + ' candidates — age and growth terms, per-category slopes, squared terms, tighter trim bands, other ridge penalties, a two-stage ratio model — and adopted none of them, because none improved leave-one-out error without worsening a held-out fold. ' +
       'Launch odds are the snapshot\u2019s own one-year hazard by age, and expected value is the implied value times those odds. ' +
       'The farm verdict nets the plan\u2019s gas and fees against the expected value at the low end of the value band (implied value divided by the leave-one-out error), so a plan that only pays at the top of the band says so. ' +
       'The live-token protocols are set aside with their market caps shown, never ranked as launch candidates.';
+    var bets = DATA.best_bets || [];
+    $('bestbets').innerHTML = '<table class="valid bets"><thead><tr><th>Bet</th><th>Protocol</th><th>Expected value</th><th>Low-end EV</th><th>Launch odds</th><th>Why it tops the list</th></tr></thead><tbody>' +
+      bets.map(function (b, i) {
+        return '<tr><td class="num">' + (i + 1) + '</td><td><b>' + esc(b.name) + '</b><span class="slug"> rank ' + b.rank + ' · ' + esc(b.slug) + '</span></td>' +
+          '<td class="num">' + fmtUsd(b.ev_usd) + '</td><td class="num">' + fmtUsd(b.ev_low_usd) + '</td>' +
+          '<td class="num">' + Math.round(b.launch_prior * 100) + '%</td><td>' + esc(b.reason) + '</td></tr>';
+      }).join('') + '</tbody></table>';
+    var cov = DATA.coverage;
+    $('methodology').innerHTML =
+      '<p>One snapshot in, one board out. The snapshot holds ' + DATA.coverage.total + ' protocols at ' + esc(DATA.as_of) +
+      '; the board ranks the ' + DATA.board_size + ' pre-token protocols that are not a wrapped, staked, bridged or exchange product, strongest implied value first, and the other ' +
+      cov.live + ' live and ' + cov.excluded + ' excluded protocols are accounted for with a reason in the Coverage tab.</p>' +
+      '<p>The value model is a ridge fit of log10(market cap) on log10(TVL), category group and log10(chain count), trained on ' + f.train_n +
+      ' clean comps — tokened protocols minus exchange, bridge and staking products and versioned or wrapped names, trimmed to the 5th–95th percentile band of market-cap-to-TVL. ' +
+      'The radar-5 search re-tested it against ' + (f.candidates || []).length + ' alternatives on the same ' + f.train_n + '-comp universe and kept it, because no alternative improved leave-one-out error (x' + f.loo_x.toFixed(2) +
+      ') without worsening a held-out fold. Every ranked protocol names its three nearest tokened comparables in its detail view, with their real market caps, so any implied value can be checked against actual peers.</p>' +
+      '<p>Launch odds are the snapshot\u2019s own one-year hazard by age; expected value is implied value times those odds; the farm verdict nets gas and fees against the low-end expected value. ' +
+      'What the model cannot see: the team, the timing, the narrative, and whether a protocol ever issues a token at all. Implied values are estimates, never prices.</p>';
     $('foot-note').textContent = 'Snapshot ' + DATA.as_of + ', ' + DATA.source +
       '. Implied values are this radar\u2019s own model claim, never a price and never a prediction that a token will be issued. ' +
       'A protocol that records no token may still have one its record does not carry.';
@@ -290,6 +315,12 @@
       '<div><span>Age with no token (context)</span><b>' + fmtAge(row.age_days) + '</b></div>' +
       '<div class="match">' + (match ? 'Recomputed from the fitted coefficients: ' + fmtUsd(recomputed) + ' — the same number the board carries.' : 'Recomputed: ' + fmtUsd(recomputed) + ' — differs from the board; the data would be stale.') + '</div>' +
       '</div><p class="sub">Model ' + esc(DATA.model_version) + ': the same fitted function scores every protocol. Expected value is the implied value times the launch odds; the low end divides the implied value by the leave-one-out error first. This is an estimate, not a price.</p></section>' +
+      '<section class="detail-section"><h3>Nearest tokened comparables</h3><p class="sub">Same category first, then closest TVL among the ' + DATA.fit.train_n + ' clean comps. Their market caps are the market\u2019s own numbers — the peers this implied value is fitted from.</p>' +
+      '<table class="valid comps"><thead><tr><th>Peer</th><th>TVL</th><th>Market cap</th><th>Mcap / TVL</th></tr></thead><tbody>' +
+      (row.comps || []).map(function (c) {
+        return '<tr><td><b>' + esc(c.name) + '</b><span class="slug"> ' + esc(c.category || 'Other') + '</span></td>' +
+          '<td class="num">' + fmtUsd(c.tvl_usd) + '</td><td class="num">' + fmtUsd(c.mcap_usd) + '</td><td class="num">' + c.ratio.toFixed(2) + 'x</td></tr>';
+      }).join('') + '</tbody></table></section>' +
       '<section class="detail-section"><h3>Farm plan</h3><ol class="steps">' + steps + '</ol></section>';
     $('detail-close').addEventListener('click', function () {
       state.selected = null;
