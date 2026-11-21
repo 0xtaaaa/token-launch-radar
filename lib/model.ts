@@ -24,18 +24,19 @@
 // computed from the snapshot at run time — never from a hardcoded list of names
 // or values. The same function scores every row.
 //
-// The radar-5 search re-tested that model against seventeen alternatives —
+// The radar-5 search re-tested that model against eighteen alternatives —
 // age and growth terms, per-category slopes, squared terms, tighter trim bands,
-// other ridge penalties, and a two-stage ratio model — and adopted NONE of them.
-// Every candidate is scored on the same 83-comp universe (leave-one-out error
-// and both held-out folds), and a candidate is adopted only if it improves the
-// leave-one-out error without worsening either held-out fold's R-squared. None
-// did: the closest calls were a tighter 10–90 trim band, whose apparent win
-// (leave-one-out x2.26) turned out to be an easier evaluation set — scored on
-// the same 83 comps it is x2.62 with a worse first fold — and a ridge lambda of
-// 15, which improves leave-one-out (x2.45) but worsens the first held-out fold
-// (R-squared 0.28 against 0.31). The full table ships in the dashboard so the
-// search is checkable, not asserted. The model stays radar-4.
+// other ridge penalties, a TVL-weighted ridge, and a two-stage ratio model —
+// and adopted NONE of them. Every candidate is scored on the same 83-comp
+// universe (leave-one-out error and both held-out folds), and a candidate is
+// adopted only if it improves the leave-one-out error without worsening either
+// held-out fold's R-squared. None did: the closest calls were a tighter 10–90
+// trim band, whose apparent win (leave-one-out x2.26) turned out to be an
+// easier evaluation set — scored on the same 83 comps it is x2.62 with a worse
+// first fold — and a ridge lambda of 15, which improves leave-one-out (x2.45)
+// but worsens the first held-out fold (R-squared 0.28 against 0.31). The full
+// table ships in the dashboard so the search is checkable, not asserted. The
+// model stays radar-4.
 //
 // The fit is still weak, and the board says so. Size and category explain about
 // a third of what a token ends up worth (in-sample R-squared about 0.34); the
@@ -46,7 +47,21 @@
 // Every ranked protocol also names its three nearest tokened comparables —
 // same category first, then closest log TVL among the clean comps — with their
 // real market caps and market-cap-to-TVL ratios, so the implied value can be
-// checked against actual peers instead of taken on trust.
+// checked against actual peers instead of taken on trust. A second, independent
+// cross-check sits beside the fitted value: the median market-cap-to-TVL
+// multiple of the five nearest clean comps, times the protocol's own TVL. The
+// two numbers come from different arithmetic — one fitted curve, one peer
+// median — so when they agree the value is corroborated, and when they disagree
+// the detail view says so in one line instead of hiding it.
+//
+// Launch scenarios: every row carries the low, base and high implied value
+// (base divided and multiplied by the leave-one-out error, the high capped at
+// the gate's $100B ceiling) and the expected value at each end, so a reader
+// sees the whole band the model actually claims, not just its middle.
+//
+// Where the pre-token value sits: the dashboard also breaks the ranked set's
+// TVL down by chain and by category, straight from the snapshot, so the
+// concentration of the opportunity is visible instead of asserted.
 //
 // Expected value: a launch is worth the implied value only if a token appears.
 // The launch odds are the snapshot's own one-year hazard by age: the share of
@@ -188,8 +203,14 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   implied_low_usd: number;
+  implied_high_usd: number;
   ev_usd: number;
   ev_low_usd: number;
+  ev_high_usd: number;
+  cross_value_usd: number;
+  cross_median_ratio: number;
+  cross_ratio: number;
+  cross_note: string;
   net_cost_usd: number;
   launch_prior: number;
   group: string;
@@ -230,8 +251,14 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   implied_low_usd: number;
+  implied_high_usd: number;
   ev_usd: number;
   ev_low_usd: number;
+  ev_high_usd: number;
+  cross_value_usd: number;
+  cross_median_ratio: number;
+  cross_ratio: number;
+  cross_note: string;
   net_cost_usd: number;
   launch_prior: number;
   group: string;
@@ -313,6 +340,20 @@ export interface Kpis {
   train_n: number;
 }
 
+/** One row of the chain/category breakdown: where the ranked set's TVL sits. */
+export interface BreakdownRow {
+  label: string;
+  tvl_usd: number;
+  n: number;
+  share: number;
+}
+
+/** Where the pre-token value sits: the ranked set's TVL by chain and by category, from the snapshot. */
+export interface Breakdown {
+  chains: BreakdownRow[];
+  categories: BreakdownRow[];
+}
+
 /** Everything the dashboard needs: the board, the live set, the accounting, and the model it runs. */
 export interface RadarData {
   as_of: string;
@@ -322,6 +363,7 @@ export interface RadarData {
   launch_prior: LaunchPrior;
   kpis: Kpis;
   coverage: Coverage;
+  breakdown: Breakdown;
   integrity: Integrity;
   model_version: string;
   search_version: string;
@@ -431,22 +473,23 @@ function features(p: SnapshotProtocol): number[] {
   return featuresFor(p, {}, '');
 }
 
-/** Ridge least squares: (X'X + lambda I) beta = X'y, intercept unpenalised. */
-function ridgeSolve(X: number[][], y: number[], lambda: number): number[] {
+/** Ridge least squares: (X'WX + lambda I) beta = X'Wy, intercept unpenalised. With no weights every row counts the same; with weights, a row counts by its weight. */
+function ridgeSolve(X: number[][], y: number[], lambda: number, weights?: number[]): number[] {
   const n = X[0]!.length;
+  const w = (k: number): number => (weights === undefined ? 1 : weights[k]!);
   const A: number[][] = [];
   const b: number[] = [];
   for (let i = 0; i < n; i++) {
     const row: number[] = [];
     for (let j = 0; j < n; j++) {
       let s = 0;
-      for (let k = 0; k < X.length; k++) s += X[k]![i]! * X[k]![j]!;
+      for (let k = 0; k < X.length; k++) s += w(k) * X[k]![i]! * X[k]![j]!;
       if (i === j && i > 0) s += lambda;
       row.push(s);
     }
     A.push(row);
     let s = 0;
-    for (let k = 0; k < X.length; k++) s += X[k]![i]! * y[k]!;
+    for (let k = 0; k < X.length; k++) s += w(k) * X[k]![i]! * y[k]!;
     b.push(s);
   }
   // Gaussian elimination with partial pivoting: deterministic, no dependencies.
@@ -504,15 +547,17 @@ function scoreCandidate(
   lambda: number,
   ratio: boolean,
   asOf: string,
+  weight: 'none' | 'tvl' = 'none',
 ): { r2_full: number; med_err_full: number; loo_med_err: number; loo_raw: number; folds: FitResult['folds'] } {
+  const wOf = (p: SnapshotProtocol): number => (weight === 'tvl' ? Math.log10(Math.max(p.tvl_usd, 1)) : 1);
   const X = universe.map((p) => featuresFor(p, spec, asOf));
   const y = universe.map((p) => targetOf(p, ratio));
-  const betaTrain = ridgeSolve(train.map((p) => featuresFor(p, spec, asOf)), train.map((p) => targetOf(p, ratio)), lambda).map(round4);
+  const betaTrain = ridgeSolve(train.map((p) => featuresFor(p, spec, asOf)), train.map((p) => targetOf(p, ratio)), lambda, train.map(wOf)).map(round4);
   const full = fitQuality(X, y, betaTrain);
   const errs: number[] = [];
   for (let i = 0; i < universe.length; i++) {
     const rest = train.filter((q) => q.slug !== universe[i]!.slug);
-    const beta = ridgeSolve(rest.map((p) => featuresFor(p, spec, asOf)), rest.map((p) => targetOf(p, ratio)), lambda);
+    const beta = ridgeSolve(rest.map((p) => featuresFor(p, spec, asOf)), rest.map((p) => targetOf(p, ratio)), lambda, rest.map(wOf));
     const pred = featuresFor(universe[i]!, spec, asOf).reduce((s, v, k) => s + v * beta[k]!, 0);
     errs.push(Math.abs(pred - y[i]!));
   }
@@ -525,7 +570,7 @@ function scoreCandidate(
     const teIdx = universe.map((_, i) => i).filter((i) => testRes.includes(i % 5));
     const teSlugs = new Set(teIdx.map((i) => universe[i]!.slug));
     const tr = train.filter((q) => !teSlugs.has(q.slug));
-    const betaFold = ridgeSolve(tr.map((p) => featuresFor(p, spec, asOf)), tr.map((p) => targetOf(p, ratio)), lambda).map(round4);
+    const betaFold = ridgeSolve(tr.map((p) => featuresFor(p, spec, asOf)), tr.map((p) => targetOf(p, ratio)), lambda, tr.map(wOf)).map(round4);
     const q = fitQuality(teIdx.map((i) => X[i]!), teIdx.map((i) => y[i]!), betaFold);
     folds.push({ test: `i%5 in {${testRes.join(',')}}`, n_test: teIdx.length, r2: round4(q.r2), med_err: round4(q.medErr) });
   }
@@ -613,9 +658,10 @@ interface SearchSpec {
   train: 'base' | 'band75' | 'band1090';
   lambda: number;
   ratio: boolean;
+  weight?: 'tvl';
 }
 
-/** The radar-5 search: eighteen candidates, all scored on the same 83-comp universe. */
+/** The radar-5 search: nineteen candidates, all scored on the same 83-comp universe. */
 const SEARCH_SPECS: SearchSpec[] = [
   { name: 'radar-4 baseline', spec: {}, train: 'base', lambda: 10, ratio: false },
   { name: 'baseline + log age', spec: { age_log: true }, train: 'base', lambda: 10, ratio: false },
@@ -633,6 +679,7 @@ const SEARCH_SPECS: SearchSpec[] = [
   { name: 'ridge lambda 8', spec: {}, train: 'base', lambda: 8, ratio: false },
   { name: 'ridge lambda 15', spec: {}, train: 'base', lambda: 15, ratio: false },
   { name: 'ridge lambda 20', spec: {}, train: 'base', lambda: 20, ratio: false },
+  { name: 'TVL-weighted ridge', spec: {}, train: 'base', lambda: 10, ratio: false, weight: 'tvl' },
   { name: 'two-stage ratio model', spec: {}, train: 'base', lambda: 10, ratio: true },
   { name: 'two-stage ratio + growth', spec: { change_nl: true }, train: 'base', lambda: 10, ratio: true },
 ];
@@ -655,11 +702,12 @@ export function fitModel(snapshot: Snapshot): FitResult {
   const trainNoteOf = (t: SearchSpec['train']): string => (t === 'band75' ? 'trim 7.5–92.5 pctile' : t === 'band1090' ? 'trim 10–90 pctile' : 'trim 5–95 pctile');
   const scored = SEARCH_SPECS.map((s) => {
     const train = trainOf(s.train);
-    const r = scoreCandidate(universe, train, s.spec, s.lambda, s.ratio, snapshot.as_of);
+    const r = scoreCandidate(universe, train, s.spec, s.lambda, s.ratio, snapshot.as_of, s.weight ?? 'none');
     const beta = ridgeSolve(
       train.map((p) => featuresFor(p, s.spec, snapshot.as_of)),
       train.map((p) => targetOf(p, s.ratio)),
       s.lambda,
+      s.weight === 'tvl' ? train.map((p) => Math.log10(Math.max(p.tvl_usd, 1))) : undefined,
     ).map(round4);
     return {
       name: s.name,
@@ -771,7 +819,7 @@ export function impliedValue(p: SnapshotProtocol, beta: number[]): { implied: nu
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrior): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrior, clean: SnapshotProtocol[]): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries.
@@ -792,11 +840,14 @@ export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrio
     const age = ageDays(snapshot.as_of, p.listed_at);
     const launch = hazardFor(age, prior);
     const impliedLow = Math.max(1, Math.round(v.implied / fit.loo_x));
+    const impliedHigh = Math.min(100_000_000_000, Math.max(1, Math.round(v.implied * fit.loo_x)));
     const ev = Math.max(1, Math.round(v.implied * launch));
     const evLow = Math.max(1, Math.round(impliedLow * launch));
+    const evHigh = Math.max(1, Math.round(impliedHigh * launch));
+    const cross = peerMultiple(p, clean, v.implied);
     const plan = farmSteps(p, age, { implied: v.implied, odds: launch, looX: fit.loo_x });
     const netCost = plan.net_cost_usd;
-    return { p, ...v, age, launch, ev, evLow, impliedLow, netCost, plan };
+    return { p, ...v, age, launch, ev, evLow, evHigh, impliedLow, impliedHigh, cross, netCost, plan };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -815,8 +866,14 @@ export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrio
     age_days: s.age,
     implied_value_usd: s.implied,
     implied_low_usd: s.impliedLow,
+    implied_high_usd: s.impliedHigh,
     ev_usd: s.ev,
     ev_low_usd: s.evLow,
+    ev_high_usd: s.evHigh,
+    cross_value_usd: s.cross.cross,
+    cross_median_ratio: s.cross.median_ratio,
+    cross_ratio: s.cross.ratio,
+    cross_note: s.cross.note,
     net_cost_usd: s.netCost,
     launch_prior: s.launch,
     group: categoryGroup(s.p.category),
@@ -1038,6 +1095,44 @@ export function peerComps(p: SnapshotProtocol, clean: SnapshotProtocol[]): PeerC
     }));
 }
 
+/** The five nearest clean comps in the peerComps order, for the cross-check. */
+function nearestFive(p: SnapshotProtocol, clean: SnapshotProtocol[]): SnapshotProtocol[] {
+  const lt = Math.log10(Math.max(p.tvl_usd, 1));
+  return clean
+    .map((q) => ({
+      q,
+      same: q.category === p.category ? 1 : 0,
+      d: Math.abs(Math.log10(Math.max(q.tvl_usd, 1)) - lt),
+    }))
+    .sort((a, b) => b.same - a.same || a.d - b.d || (a.q.slug < b.q.slug ? -1 : a.q.slug > b.q.slug ? 1 : 0))
+    .slice(0, 5)
+    .map(({ q }) => q);
+}
+
+/**
+ * The peer-multiple cross-check: a second, independent implied value — the
+ * median market-cap-to-TVL multiple of the five nearest clean comps, times
+ * the protocol's own TVL. It comes from different arithmetic than the fitted
+ * curve (one peer median, one fitted curve), so agreement corroborates the
+ * value and disagreement is flagged in one line instead of hidden. The
+ * fitted value stays the ranked one; this number only checks it.
+ */
+export function peerMultiple(p: SnapshotProtocol, clean: SnapshotProtocol[], fitted: number): { cross: number; median_ratio: number; ratio: number; note: string } {
+  const five = nearestFive(p, clean);
+  const ratios = five.map((q) => q.mcap_usd! / q.tvl_usd).sort((a, b) => a - b);
+  const median = ratios.length % 2 === 1
+    ? ratios[(ratios.length - 1) / 2]!
+    : (ratios[ratios.length / 2 - 1]! + ratios[ratios.length / 2]!) / 2;
+  const cross = Math.max(1, Math.round(median * p.tvl_usd));
+  const ratio = round4(cross / fitted);
+  const note = ratio >= 2
+    ? `Peers imply ${compactUsd(cross)} — ${ratio.toFixed(1)}x the fitted value: the nearest names trade richer than the size curve.`
+    : ratio <= 0.5
+      ? `Peers imply ${compactUsd(cross)} — ${ratio.toFixed(2)}x the fitted value: the nearest names trade cheaper than the size curve.`
+      : '';
+  return { cross, median_ratio: round4(median), ratio, note };
+}
+
 /** The ten best bets: the board's highest expected values, each with a one-line reason drawn from its own figures. */
 export function bestBets(board: BoardRow[]): BestBet[] {
   return [...board]
@@ -1139,8 +1234,14 @@ export function radarRow(row: BoardRow, clean: SnapshotProtocol[]): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     implied_low_usd: row.implied_low_usd,
+    implied_high_usd: row.implied_high_usd,
     ev_usd: row.ev_usd,
     ev_low_usd: row.ev_low_usd,
+    ev_high_usd: row.ev_high_usd,
+    cross_value_usd: row.cross_value_usd,
+    cross_median_ratio: row.cross_median_ratio,
+    cross_ratio: row.cross_ratio,
+    cross_note: row.cross_note,
     net_cost_usd: row.net_cost_usd,
     launch_prior: row.launch_prior,
     group: row.group,
@@ -1152,14 +1253,39 @@ export function radarRow(row: BoardRow, clean: SnapshotProtocol[]): RadarRow {
   };
 }
 
+/** Where the ranked set's TVL sits: by main chain and by category, top five each, straight from the snapshot. */
+export function buildBreakdown(board: BoardRow[]): Breakdown {
+  const total = board.reduce((s, r) => s + r.tvl_usd, 0);
+  const byChain = new Map<string, { tvl: number; n: number }>();
+  const byCat = new Map<string, { tvl: number; n: number }>();
+  for (const r of board) {
+    const chain = r.chains.length > 0 ? r.chains[0]! : 'Unnamed chain';
+    const c = byChain.get(chain) ?? { tvl: 0, n: 0 };
+    c.tvl += r.tvl_usd;
+    c.n += 1;
+    byChain.set(chain, c);
+    const cat = r.category ?? 'Other';
+    const g = byCat.get(cat) ?? { tvl: 0, n: 0 };
+    g.tvl += r.tvl_usd;
+    g.n += 1;
+    byCat.set(cat, g);
+  }
+  const top = (m: Map<string, { tvl: number; n: number }>): BreakdownRow[] =>
+    [...m.entries()]
+      .map(([label, v]) => ({ label, tvl_usd: v.tvl, n: v.n, share: total > 0 ? round4(v.tvl / total) : 0 }))
+      .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))
+      .slice(0, 5);
+  return { chains: top(byChain), categories: top(byCat) };
+}
+
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const fit = fitModel(snapshot);
   const prior = launchPrior(snapshot);
-  const board = buildBoard(snapshot, fit, prior);
+  const clean = cleanTrainingSet(snapshot).clean;
+  const board = buildBoard(snapshot, fit, prior, clean);
   const live = liveRows(snapshot);
   const { accounting, coverage } = buildAccounting(snapshot, board, live);
-  const clean = cleanTrainingSet(snapshot).clean;
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const sortedVals = board.map((r) => r.implied_value_usd).sort((a, b) => a - b);
   const median = sortedVals.length % 2 === 1
@@ -1184,6 +1310,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       train_n: fit.train_n,
     },
     coverage,
+    breakdown: buildBreakdown(board),
     integrity: {
       as_of: snapshot.as_of,
       floor_usd: snapshot.floor_usd,
