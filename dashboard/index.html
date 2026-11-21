@@ -92,7 +92,18 @@
     <p class="sub">The coefficients come from the snapshot's own tokened protocols, not from a hand-tuned rule. No name is special-cased, and no row is hand-picked.</p>
     <div class="formula" id="formula"></div>
     <div id="validation"></div>
+    <h3>The radar-5 search — every candidate on one scoreboard</h3>
+    <p class="sub">Eighteen candidates, each scored on the same 83-comp universe. A candidate is adopted only if it improves leave-one-out error without worsening either held-out fold's R-squared.</p>
+    <div id="candidates"></div>
     <p class="sub" id="model-note"></p>
+  </section>
+
+  <section class="panel method" id="method">
+    <h2>Best bets — the ten plans with the highest expected value</h2>
+    <p class="sub">Expected value is the implied value times the launch odds. The low end divides by the leave-one-out error first, so a bet only tops this list when it survives the pessimistic case.</p>
+    <div id="bestbets"></div>
+    <h2>How the radar is built</h2>
+    <div id="methodology"></div>
   </section>
 
   <footer class="foot">

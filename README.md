@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/0xtaaaa/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/0xtaaaa/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-A token launch radar: it ranks all 198 pre-token protocols in the snapshot by a fitted implied token value, and shows a concrete farm plan for each one — each plan ending in a verdict that nets its gas and fees against the expected value at the low end of the value band. Protocols whose token already trades are set aside with their market caps, never ranked as launch candidates. Every one of the snapshot's 758 protocols is accounted for: ranked, live, or excluded with a reason.
+A token launch radar: it ranks all 198 pre-token protocols in the snapshot by a fitted implied token value, and shows a concrete farm plan for each one — each plan ending in a verdict that nets its gas and fees against the expected value at the low end of the value band. Protocols whose token already trades are set aside with their market caps, never ranked as launch candidates. Every one of the snapshot's 758 protocols is accounted for: ranked, live, or excluded with a reason. Every ranked protocol names its three nearest tokened comparables, with their real market caps, and the ten highest-expected-value plans are listed as Best bets.
 
 ## The model — radar-4, a clean-comps size curve
 
@@ -19,9 +19,32 @@ log10(implied value) = 3.3618 + 0.4823 x log10(tvl_usd)
 
 Ridge lambda 10, intercept unpenalised, computed from the snapshot by `main.ts` — no name and no value is ever hardcoded. The same function scores every row.
 
-## How the terms were chosen — and how good the fit is
+## How the terms were chosen — the radar-5 search
 
-Every term was kept only if it improved leave-one-out error. Age (from `listed_at`) and seven-day growth were tested and dropped: neither improved it. Per-category slopes were tested and rejected as unstable (a held-out fold R-squared of -2.5). The chain-count term stays because it improves leave-one-out error (x2.70 without it, x2.63 with it). Trimming the ratio outliers matters too: the same fit on the untrimmed 92 comps has a leave-one-out error of x2.94.
+The radar-5 search scored eighteen candidates on the same 83-comp universe (leave-one-out error and both held-out folds), and adopted none of them. A candidate is adopted only if it improves leave-one-out error without worsening either held-out fold's R-squared. The closest calls fail that rule: a tighter 10–90 trim band looks better on its own comps (x2.26) but scores x2.62 with a worse first fold on the shared 83 — it was dropping the hardest comps, not predicting better — and a ridge lambda of 15 improves leave-one-out to x2.45 but gives up the first fold (0.28 against 0.31). So radar-4 stands, and the search is printed in full so the choice is checkable, not asserted.
+
+| Candidate | Comps | R-squared | Leave-one-out | Held-out R², fold 1 | Held-out R², fold 2 |
+|---|---|---|---|---|---|
+| radar-4 baseline — **adopted** | 83 | 0.35 | x2.63 | 0.31 | 0.23 |
+| baseline + log age | 83 | 0.35 | x2.66 | 0.31 | 0.22 |
+| baseline + age buckets | 83 | 0.39 | x2.73 | 0.32 | 0.19 |
+| baseline + growth, signed log | 83 | 0.35 | x2.63 | 0.29 | 0.19 |
+| baseline + growth, linear | 83 | 0.35 | x2.70 | 0.31 | 0.22 |
+| baseline + per-category slopes | 83 | 0.36 | x2.95 | 0.20 | 0.10 |
+| baseline + log age + growth | 83 | 0.35 | x2.62 | 0.29 | 0.19 |
+| baseline + log TVL squared | 83 | 0.35 | x2.94 | 0.36 | 0.15 |
+| baseline + chain-count squared | 83 | 0.35 | x2.61 | 0.31 | 0.22 |
+| baseline + age buckets + growth | 83 | 0.39 | x2.82 | 0.28 | 0.17 |
+| trim 7.5–92.5 pctile | 79 | 0.34 | x2.58 | 0.28 | 0.28 |
+| trim 10–90 pctile | 73 | 0.31 | x2.62 | 0.28 | 0.27 |
+| trim 10–90 + log age | 73 | 0.31 | x2.62 | 0.27 | 0.27 |
+| ridge lambda 8 | 83 | 0.36 | x2.54 | 0.32 | 0.22 |
+| ridge lambda 15 | 83 | 0.33 | x2.45 | 0.28 | 0.24 |
+| ridge lambda 20 | 83 | 0.31 | x2.51 | 0.25 | 0.24 |
+| two-stage ratio model | 83 | 0.18 | x2.91 | 0.15 | 0.14 |
+| two-stage ratio + growth | 83 | 0.19 | x2.91 | 0.11 | 0.12 |
+
+Every term was kept only if it improved leave-one-out error. The chain-count term stays because it improves leave-one-out error (x2.80 without it, x2.63 with it). Trimming the ratio outliers matters too: the same fit on the untrimmed 92 comps has a leave-one-out error of x3.13.
 
 | Check | Result |
 |---|---|
@@ -39,6 +62,8 @@ Launch odds are the snapshot's own one-year hazard by age — the share of proto
 - 198 rows: the whole rankable set — all 40 watchlist protocols (watchlist TVL $12.93B) plus every other rankable pre-token protocol in the snapshot.
 - Rank 1 is Sentora Curator at $68.0M implied ($18.1M expected value, $6.9M at the low end); the median row is $7.2M implied; the last row is $2.2M.
 - Each row carries a seven-step farm plan naming a concrete deposit ($50–$250 by TVL), gas by chain and a hold period in days, ending in a costed verdict.
+- Each row's detail view names its three nearest tokened comparables — same category first, then closest TVL — with their real market caps and market-cap-to-TVL ratios.
+- Best bets lists the ten plans with the highest expected value, each with a one-line reason.
 - Coverage: 758 protocols accounted for — 198 ranked, 24 live (shown at market cap), 536 excluded with a reason (392 token already trades, 128 CEX/bridge/staking products, 16 wrapped, staked or versioned products).
 
 ## Run it
