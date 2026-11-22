@@ -1,7 +1,7 @@
 // Token Launch Radar — entry program (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every pre-token protocol with the fitted radar-4 model in lib/model.ts, writes
+// scores every pre-token protocol with the fitted model in lib/model.ts, writes
 // the ranked board to /output/board.json, writes the dashboard's data beside the
 // page as /output/data.js, copies this repository's dashboard/ and screenshots/
 // to /output, and writes /output/dossier.json with the vendored make.fun library.
@@ -96,8 +96,8 @@ const top = board[0]!;
 const bottom = board[board.length - 1]!;
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: model radar-4, clean comps ${radar.fit.train_n}, R-squared ${radar.fit.r2_full}, leave-one-out error x${radar.fit.loo_x}\n` +
-    `token radar: radar-5 search: ${radar.fit.candidates.length} candidates, ${radar.fit.search_note}\n` +
+    `token radar: model ${radar.model_version}, clean comps ${radar.fit.train_n}, R-squared ${radar.fit.r2_full}, leave-one-out error x${radar.fit.loo_x}\n` +
+    `token radar: ${radar.search_version} search: ${radar.fit.candidates.length} candidates, ${radar.fit.search_note}\n` +
     `token radar: rank 1 is ${top.slug} at $${top.implied_value_usd.toLocaleString('en-US')}, rank ${board.length} is ${bottom.slug} at $${bottom.implied_value_usd.toLocaleString('en-US')}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

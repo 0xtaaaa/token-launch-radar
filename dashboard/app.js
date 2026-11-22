@@ -34,15 +34,36 @@
 
   // The fitted model, recomputed here from the shipped coefficients and the
   // row's own figures, so the page can check the number board.json carries
-  // with the same arithmetic. log10(implied) = b0 + b1*log10(TVL) + group beta
-  // + b5*log10(chain count). Dexs is the baseline group (no dummy).
+  // with the same arithmetic. The recompute follows the adopted model's
+  // family: the ridge curve (and its median, Huber, winsorized and hinge
+  // cousins) from the shipped beta; the blend as half ridge, half the
+  // peer-multiple cross-check; shrinkage from the global beta plus the
+  // shrunk group adjustment; kNN from the shipped kNN value. Dexs is the
+  // baseline group (no dummy).
   var GROUP_DUMMIES = ['LEND', 'RWA', 'YIELD'];
   function impliedOf(row, fit) {
     var beta = fit.beta;
-    var logv = beta[0] + beta[1] * Math.log10(Math.max(row.tvl_usd, 1));
-    var gi = GROUP_DUMMIES.indexOf(row.group || 'OTHER');
-    if (gi >= 0) logv += beta[2 + gi];
-    logv += beta[5] * Math.log10(Math.max((row.chains || []).length, 1));
+    var logTvl = Math.log10(Math.max(row.tvl_usd, 1));
+    var nChains = (row.chains || []).length;
+    var logChains = Math.log10(Math.max(fit.spec && fit.spec.chains_cap ? Math.min(nChains, 5) : nChains, 1));
+    var logv;
+    if (fit.kind === 'knn') return row.knn_value_usd || row.implied_value_usd;
+    if (fit.kind === 'shrink') {
+      var adj = (fit.extra && fit.extra.group_adj && fit.extra.group_adj[row.group || 'OTHER']) || 0;
+      logv = beta[0] + beta[1] * logTvl + beta[2] * logChains + adj;
+    } else if (fit.kind === 'blend') {
+      var logvRidge = beta[0] + beta[1] * logTvl;
+      var gi = GROUP_DUMMIES.indexOf(row.group || 'OTHER');
+      if (gi >= 0) logvRidge += beta[2 + gi];
+      logvRidge += beta[5] * logChains;
+      logv = 0.5 * logvRidge + 0.5 * Math.log10(Math.max(row.cross_value_usd || 1, 1));
+    } else {
+      logv = beta[0] + beta[1] * logTvl;
+      var gi2 = GROUP_DUMMIES.indexOf(row.group || 'OTHER');
+      if (gi2 >= 0) logv += beta[2 + gi2];
+      logv += beta[5] * logChains;
+      if (fit.spec && fit.spec.tvl_hinge) logv += (beta[6] || 0) * Math.max(0, logTvl - 9);
+    }
     logv = Math.min(14, Math.max(0, logv));
     return Math.max(1, Math.round(Math.pow(10, logv)));
   }
@@ -84,6 +105,7 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
+      else if (key === 'evlow') { av = a.ev_low_usd; bv = b.ev_low_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -121,11 +143,9 @@
       '<span class="integ-limits">' + esc(integ.limits) + '</span>';
     var f = DATA.fit;
     var beta = f.beta;
-    var terms = GROUP_DUMMIES.map(function (g, i) { return g + ' ' + (beta[2 + i] >= 0 ? '+' : '') + beta[2 + i].toFixed(4); }).join(', ');
-    $('formula').textContent = 'log10(implied value) = ' + beta[0].toFixed(4) + ' + ' + beta[1].toFixed(4) +
-      ' x log10(tvl_usd)' + '   |   group adjustments (Dexs = 0): ' + terms +
-      '   |   chains term ' + beta[5].toFixed(4) + ' x log10(chain count)' +
-      '   |   ridge lambda ' + f.lambda + ', fitted on ' + f.train_n + ' clean comps';
+    $('model-title').textContent = 'How implied value is fitted — model ' + DATA.model_version;
+    $('formula').textContent = f.formula ||
+      ('log10(implied value) = ' + beta[0].toFixed(4) + ' + ' + beta[1].toFixed(4) + ' x log10(tvl_usd)');
     var foldRows = f.folds.map(function (fold) {
       return '<tr><td>Held out, ' + esc(fold.test) + '</td><td class="num">' + fold.n_test + '</td><td class="num">' +
         fold.r2.toFixed(2) + '</td><td class="num">x' + Math.pow(10, fold.med_err).toFixed(2) + '</td></tr>';
@@ -134,6 +154,7 @@
       '<tr><td>Full fit, all ' + f.train_n + ' clean comps</td><td class="num">' + f.train_n + '</td><td class="num">' +
       f.r2_full.toFixed(2) + '</td><td class="num">x' + Math.pow(10, f.med_err_full).toFixed(2) + '</td></tr>' +
       '<tr><td>Leave-one-out, refit without each comp</td><td class="num">' + f.train_n + '</td><td class="num">—</td><td class="num">x' + f.loo_x.toFixed(2) + '</td></tr>' + foldRows + '</tbody></table>';
+    $('candidates-title').textContent = 'The ' + DATA.search_version + ' search — every candidate on one scoreboard';
     var candRows = (f.candidates || []).map(function (c) {
       return '<tr' + (c.adopted ? ' class="adopted"' : '') + '><td>' + esc(c.name) + (c.adopted ? ' <b>adopted</b>' : '') + '</td>' +
         '<td class="num">' + c.train_n + '</td><td class="num">' + c.r2_full.toFixed(2) + '</td>' +
@@ -143,10 +164,14 @@
     $('candidates-sub').textContent = (f.candidates || []).length + ' candidates, each scored on the same ' + f.train_n +
       '-comp universe. A candidate is adopted only if it improves leave-one-out error without worsening either held-out fold\u2019s R-squared.';
     $('candidates').innerHTML = '<table class="valid cand"><thead><tr><th>Candidate</th><th>Comps</th><th>R-squared</th><th>Leave-one-out</th><th>Held-out R², fold 1</th><th>Held-out R², fold 2</th></tr></thead><tbody>' + candRows + '</tbody></table>' +
-      '<p class="sub">' + esc(f.search_note || '') + ' The closest calls: a tighter 10–90 trim band looks better on its own comps (x2.26) but scores x2.62 with a worse first fold on the shared 83 — it was dropping the hardest comps, not predicting better. A ridge lambda of 15 improves leave-one-out to x2.45 but gives up the first fold (0.28 against 0.31).</p>';
+      '<p class="sub">' + esc(f.search_note || '') + ' The closest calls: a ridge lambda of 15 has the best leave-one-out error of all (x2.45) but gives up the first held-out fold (0.28 against 0.31); a Huber ridge (x2.52) and a ridge lambda of 8 (x2.54) fail the same fold rule; the kNN peer-multiple model is far worse (x4.71, second fold \u22120.56) — the peers alone cannot price a launch; the blend of curve and cross-check (x3.57) is worse than either half, because the cross-check is the noisier estimator.</p>';
+    var adoptedCand = null;
+    (f.candidates || []).forEach(function (c) { if (c.adopted) adoptedCand = c; });
     $('model-note').textContent = 'The fit is honest about its weakness: size, category and chain count explain about a third of what a token ends up worth (R-squared ' +
       f.r2_full.toFixed(2) + '); the rest is the team, the timing and the narrative, none of which a TVL snapshot can see. ' +
-      'The radar-5 search tested ' + (f.candidates || []).length + ' candidates — age and growth terms, per-category slopes, squared terms, tighter trim bands, other ridge penalties, a TVL-weighted ridge, a two-stage ratio model — and adopted none of them, because none improved leave-one-out error without worsening a held-out fold. ' +
+      'The ' + DATA.search_version + ' search tested ' + (f.candidates || []).length + ' candidates — the nineteen from the earlier search plus twelve new families (a median LAD ridge, a Huber ridge, k-nearest-neighbour peer multiples, a curve-and-cross-check blend, shrunk group intercepts, a winsorized target, a hinge in the size curve, a capped chain count, and two more ridge penalties) — and adopted ' +
+      (adoptedCand ? 'the ' + adoptedCand.name + ', because it alone improved leave-one-out error (x' + adoptedCand.loo_x.toFixed(2) + ' against x2.63) without worsening either held-out fold. ' : 'none of them. ') +
+      'The median fit\u2019s mean-based R-squared (' + f.r2_full.toFixed(2) + ') is lower than the mean fit\u2019s (0.35) by construction: it fits the typical protocol, not the average, so one rich outlier cannot pull the curve. ' +
       'Launch odds are the snapshot\u2019s own one-year hazard by age, and expected value is the implied value times those odds. ' +
       'The farm verdict nets the plan\u2019s gas and fees against the expected value at the low end of the value band (implied value divided by the leave-one-out error), so a plan that only pays at the top of the band says so. ' +
       'The live-token protocols are set aside with their market caps shown, never ranked as launch candidates.';
@@ -162,10 +187,17 @@
       '<p>One snapshot in, one board out. The snapshot holds ' + DATA.coverage.total + ' protocols at ' + esc(DATA.as_of) +
       '; the board ranks the ' + DATA.board_size + ' pre-token protocols that are not a wrapped, staked, bridged or exchange product, strongest implied value first, and the other ' +
       cov.live + ' live and ' + cov.excluded + ' excluded protocols are accounted for with a reason in the Coverage tab.</p>' +
-      '<p>The value model is a ridge fit of log10(market cap) on log10(TVL), category group and log10(chain count), trained on ' + f.train_n +
+      '<p>The value model is ' + (f.kind === 'lad'
+        ? 'a least-absolute-deviations (median) ridge fit of log10(market cap) on log10(TVL), category group and log10(chain count) — it fits the median protocol, so one rich outlier cannot pull the curve — trained on '
+        : f.kind === 'knn'
+          ? 'a k-nearest-neighbour median-ratio model — each protocol is priced at its TVL times the median market-cap-to-TVL of its nearest clean comps — drawn from '
+          : f.kind === 'blend'
+            ? 'a blend of a ridge fit of log10(market cap) on log10(TVL), category group and log10(chain count) and the peer-multiple cross-check, trained on '
+            : f.kind === 'shrink'
+              ? 'a global ridge curve of log10(market cap) on log10(TVL) and log10(chain count) plus group intercepts shrunk toward zero, trained on '
+              : 'a ridge fit of log10(market cap) on log10(TVL), category group and log10(chain count), trained on ') + f.train_n +
       ' clean comps — tokened protocols minus exchange, bridge and staking products and versioned or wrapped names, trimmed to the 5th–95th percentile band of market-cap-to-TVL. ' +
-      'The radar-5 search re-tested it against ' + (f.candidates || []).length + ' alternatives on the same ' + f.train_n + '-comp universe and kept it, because no alternative improved leave-one-out error (x' + f.loo_x.toFixed(2) +
-      ') without worsening a held-out fold. Every ranked protocol names its three nearest tokened comparables in its detail view, with their real market caps, so any implied value can be checked against actual peers; a second cross-check — the median market-cap-to-TVL multiple of the five nearest comps, times the protocol\u2019s own TVL — sits beside the fitted value, and the launch scenarios show the low, base and high end of the band the model actually claims.</p>' +
+      'The ' + DATA.search_version + ' search re-tested it against ' + (f.candidates || []).length + ' alternatives on the same ' + f.train_n + '-comp universe and kept ' + (adoptedCand ? 'the ' + adoptedCand.name + ' (leave-one-out error x' + f.loo_x.toFixed(2) + ')' : 'the baseline') + ', because no other alternative improved leave-one-out error without worsening a held-out fold. Every ranked protocol names its three nearest tokened comparables in its detail view, with their real market caps, so any implied value can be checked against actual peers; a second cross-check — the median market-cap-to-TVL multiple of the five nearest comps, times the protocol\u2019s own TVL — sits beside the fitted value, and the launch scenarios show the low, base and high end of the band the model actually claims.</p>' +
       '<p>Launch odds are the snapshot\u2019s own one-year hazard by age; expected value is implied value times those odds; the farm verdict nets gas and fees against the low-end expected value. ' +
       'What the model cannot see: the team, the timing, the narrative, and whether a protocol ever issues a token at all. Implied values are estimates, never prices.</p>';
     var bd = DATA.breakdown;
@@ -214,6 +246,8 @@
       '<td class="num">' + fmtAge(r.age_days) + '</td>' +
       '<td><div class="implied"><div class="bar" aria-hidden="true"><i style="width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%"></i></div>' +
       '<span class="num">' + fmtUsd(r.implied_value_usd) + '</span></div></td>' +
+      '<td><div class="evlow"><span class="num">' + fmtUsd(r.ev_low_usd) + '</span>' +
+      '<span class="sub">net ' + fmtUsd(r.net_cost_usd) + '</span></div></td>' +
       '<td><span class="status">no token</span></td></tr>';
   }
 
@@ -241,7 +275,7 @@
         return;
       }
       empty.hidden = true;
-      body.innerHTML = '<tr class="cov-head"><td colspan="7"><b>' + cov.total + ' protocols in the snapshot</b> — ' + cov.ranked + ' ranked, ' +
+      body.innerHTML = '<tr class="cov-head"><td colspan="8"><b>' + cov.total + ' protocols in the snapshot</b> — ' + cov.ranked + ' ranked, ' +
         cov.live + ' live, ' + cov.excluded + ' excluded. Excluded by reason: ' +
         cov.by_reason.map(function (r) { return esc(r.reason) + ' ' + r.n; }).join(' · ') + '</td></tr>' +
         acc.map(function (a) {
@@ -249,6 +283,7 @@
             '<td><div class="name"><b>' + esc(a.name) + '</b><span class="slug">' + esc(a.slug) + '</span>' +
             '<span class="sub">' + esc(a.category || 'Other') + '</span></div></td>' +
             '<td class="num">—</td><td class="num">—</td><td class="num">—</td>' +
+            '<td class="num">—</td>' +
             '<td class="num">—</td>' +
             '<td><span class="status' + (a.status === 'live' ? ' live' : '') + '">' + esc(a.reason) + '</span></td></tr>';
         }).join('');
@@ -266,6 +301,7 @@
           '<td class="num ' + (r.change_7d !== null && r.change_7d >= 0 ? 'pos' : 'neg') + '">' + fmtPct(r.change_7d) + '</td>' +
           '<td class="num">—</td>' +
           '<td class="num">' + fmtUsd(r.mcap_usd) + '</td>' +
+          '<td class="num">—</td>' +
           '<td><span class="status live">already trades</span></td></tr>';
       }).join('');
       empty.hidden = true;
@@ -309,11 +345,26 @@
       var verdict = action.indexOf('Verdict:') === 0 ? ' class="verdict"' : '';
       return '<li' + verdict + '><b>' + esc(action) + '</b><span class="cost">' + esc(tail) + '</span></li>';
     }).join('');
+    var groupText = row.group_adjustment === 0
+      ? 'the ' + esc(row.group) + ' group carries no adjustment (Dexs is the baseline group)'
+      : 'the ' + esc(row.group) + ' group adjustment is ' + (row.group_adjustment >= 0 ? '+' : '') + row.group_adjustment.toFixed(4) + ' in log terms';
+    var netLow = row.ev_low_usd - row.net_cost_usd;
+    var whyVerdict = netLow >= 0
+      ? 'At the low end the plan already nets ' + fmtUsd(netLow) + ' after gas and fees, so the farm pays even if the launch lands at the bottom of the band.'
+      : 'At the low end the plan is ' + fmtUsd(-netLow) + ' underwater after gas and fees — it only pays if the launch lands above the bottom of the band.';
+    var whyCross = row.cross_note
+      ? esc(row.cross_note)
+      : 'The five nearest peers imply ' + fmtUsd(row.cross_value_usd) + ' (' + row.cross_ratio.toFixed(2) + 'x the fitted value), so the curve and the nearest names point the same way.';
     body.innerHTML =
       '<div class="detail-head"><div><span class="rankline">RANK ' + row.rank + ' OF ' + DATA.board_size + '</span>' +
       '<h2>' + esc(row.name) + '</h2>' +
       '<p class="sub">' + esc(row.category || 'Other') + ' on ' + esc(row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain') + '</p></div>' +
       '<button class="close" type="button" id="detail-close" aria-label="Close details">Close</button></div>' +
+      '<section class="detail-section"><h3>Why it ranks here</h3><p>' +
+      'Rank ' + row.rank + ' of ' + DATA.board_size + ' because its ' + fmtUsd(row.tvl_usd) + ' of TVL sits on the size curve at ' + fmtUsd(row.implied_value_usd) + ': ' + groupText + ' and its ' + (row.chains ? row.chains.length : 0) + ' chains add ' + (row.chains_term >= 0 ? '+' : '') + row.chains_term.toFixed(4) + '. ' +
+      whyCross + ' ' +
+      'At ' + Math.round(row.launch_prior * 100) + '% launch odds the expected value is ' + fmtUsd(row.ev_usd) + ' against ' + fmtUsd(row.net_cost_usd) + ' of gas and fees. ' + whyVerdict +
+      '</p></section>' +
       '<section class="detail-section"><h3>Implied value</h3><div class="equation">' +
       '<div><span>TVL</span><b>' + fmtUsd(row.tvl_usd) + '</b></div>' +
       '<div><span>Category group</span><b>' + esc(row.group) + ' (' + (row.group_adjustment >= 0 ? '+' : '') + row.group_adjustment.toFixed(4) + ')</b></div>' +
@@ -353,11 +404,67 @@
     });
   }
 
+  function rowBySlug(slug) {
+    for (var i = 0; i < DATA.rows.length; i++) if (DATA.rows[i].slug === slug) return DATA.rows[i];
+    return null;
+  }
+
+  function renderWatchlist() {
+    var list = DATA.rows.filter(function (r) { return r.watchlist; }).sort(function (a, b) { return b.ev_low_usd - a.ev_low_usd; });
+    $('watchlist-body').innerHTML = '<table class="valid"><thead><tr><th>Rank</th><th>Protocol</th><th>TVL</th><th>Implied value</th><th>Launch odds</th><th>Low-end EV</th><th>Farm net cost</th><th>Pays at the low end?</th></tr></thead><tbody>' +
+      list.map(function (r) {
+        var pays = r.ev_low_usd >= r.net_cost_usd;
+        return '<tr data-slug="' + esc(r.slug) + '" tabindex="0"><td class="num">' + r.rank + '</td>' +
+          '<td><b>' + esc(r.name) + '</b><span class="slug"> ' + esc(r.slug) + '</span></td>' +
+          '<td class="num">' + fmtUsd(r.tvl_usd) + '</td><td class="num">' + fmtUsd(r.implied_value_usd) + '</td>' +
+          '<td class="num">' + Math.round(r.launch_prior * 100) + '%</td><td class="num">' + fmtUsd(r.ev_low_usd) + '</td>' +
+          '<td class="num">' + fmtUsd(r.net_cost_usd) + '</td>' +
+          '<td>' + (pays ? '<b>Yes</b> — nets ' + fmtUsd(r.ev_low_usd - r.net_cost_usd) : 'No — ' + fmtUsd(r.net_cost_usd - r.ev_low_usd) + ' short') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  var compareState = { a: null, b: null };
+  function renderCompare() {
+    var selA = $('compare-a'), selB = $('compare-b');
+    var opts = DATA.rows.map(function (r) { return '<option value="' + esc(r.slug) + '">' + r.rank + '. ' + esc(r.name) + '</option>'; }).join('');
+    if (!compareState.a) compareState.a = DATA.rows[0].slug;
+    if (!compareState.b) compareState.b = DATA.rows[1].slug;
+    if (selA.innerHTML !== opts) selA.innerHTML = opts;
+    if (selB.innerHTML !== opts) selB.innerHTML = opts;
+    selA.value = compareState.a;
+    selB.value = compareState.b;
+    var a = rowBySlug(compareState.a), b = rowBySlug(compareState.b);
+    if (!a || !b) { $('compare-body').innerHTML = ''; return; }
+    var rows = [
+      ['Rank', String(a.rank), String(b.rank)],
+      ['TVL', fmtUsd(a.tvl_usd), fmtUsd(b.tvl_usd)],
+      ['Implied value', fmtUsd(a.implied_value_usd), fmtUsd(b.implied_value_usd)],
+      ['Implied value, low end', fmtUsd(a.implied_low_usd), fmtUsd(b.implied_low_usd)],
+      ['Peer-multiple cross-check', fmtUsd(a.cross_value_usd), fmtUsd(b.cross_value_usd)],
+      ['Cross-check ÷ fitted', a.cross_ratio.toFixed(2) + 'x', b.cross_ratio.toFixed(2) + 'x'],
+      ['Launch odds', Math.round(a.launch_prior * 100) + '%', Math.round(b.launch_prior * 100) + '%'],
+      ['Expected value', fmtUsd(a.ev_usd), fmtUsd(b.ev_usd)],
+      ['Expected value, low end', fmtUsd(a.ev_low_usd), fmtUsd(b.ev_low_usd)],
+      ['Farm net cost', fmtUsd(a.net_cost_usd), fmtUsd(b.net_cost_usd)],
+      ['Low-end EV net of farm cost', fmtUsd(a.ev_low_usd - a.net_cost_usd), fmtUsd(b.ev_low_usd - b.net_cost_usd)],
+      ['Age with no token', fmtAge(a.age_days), fmtAge(b.age_days)],
+      ['Chains', (a.chains || []).join(', '), (b.chains || []).join(', ')],
+    ];
+    var netA = a.ev_low_usd - a.net_cost_usd, netB = b.ev_low_usd - b.net_cost_usd;
+    var verdict = netA === netB ? 'Dead even at the low end: both net ' + fmtUsd(netA) + ' after farm costs.'
+      : (netA > netB ? a.name : b.name) + ' wins the low end: it nets ' + fmtUsd(Math.max(netA, netB)) + ' after farm costs, against ' + fmtUsd(Math.min(netA, netB)) + ' for ' + (netA > netB ? b.name : a.name) + '.';
+    $('compare-body').innerHTML = '<table class="valid"><thead><tr><th></th><th>' + esc(a.name) + ' <span class="slug">rank ' + a.rank + '</span></th><th>' + esc(b.name) + ' <span class="slug">rank ' + b.rank + '</span></th></tr></thead><tbody>' +
+      rows.map(function (r) { return '<tr><td><b>' + esc(r[0]) + '</b></td><td class="num">' + esc(r[1]) + '</td><td class="num">' + esc(r[2]) + '</td></tr>'; }).join('') +
+      '</tbody></table><p class="sub">' + esc(verdict) + '</p>';
+  }
+
   function render() {
     renderMeta();
     renderControls();
     renderTable();
     renderDetail();
+    renderWatchlist();
+    renderCompare();
   }
 
   function openDetail(slug) {
@@ -383,6 +490,18 @@
   $('tab-live').addEventListener('click', function () { state.tab = 'live'; state.selected = null; writeHash(); render(); });
   $('tab-coverage').addEventListener('click', function () { state.tab = 'coverage'; state.selected = null; writeHash(); render(); });
   $('clear-filters').addEventListener('click', function () { state.q = ''; state.category = 'all'; writeHash(); render(); });
+  $('compare-a').addEventListener('change', function (e) { compareState.a = e.target.value; renderCompare(); });
+  $('compare-b').addEventListener('change', function (e) { compareState.b = e.target.value; renderCompare(); });
+  $('watchlist-body').addEventListener('click', function (e) {
+    var tr = e.target.closest ? e.target.closest('tr[data-slug]') : null;
+    if (tr) openDetail(tr.getAttribute('data-slug'));
+  });
+  $('watchlist-body').addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest) {
+      var tr = e.target.closest('tr[data-slug]');
+      if (tr) { e.preventDefault(); openDetail(tr.getAttribute('data-slug')); }
+    }
+  });
   $('board-body').addEventListener('click', function (e) {
     var tr = e.target.closest ? e.target.closest('tr[data-slug]') : null;
     if (tr && state.tab === 'pre') openDetail(tr.getAttribute('data-slug'));
