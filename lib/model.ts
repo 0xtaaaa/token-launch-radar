@@ -1,5 +1,5 @@
 // Token Launch Radar — model radar-4 (clean-comps size curve), re-tested by the
-// radar-5 search.
+// radar-6 search.
 //
 // One snapshot of the protocol universe in, one ranked board out. The board ranks
 // pre-token protocols only: a protocol is pre-token when its snapshot record carries
@@ -20,26 +20,32 @@
 // removes nine protocols whose tokens trade at a ratio no peer supports. What
 // remains is 83 clean comps. log10(market cap) is regressed on log10(TVL), the
 // protocol's category group (Lending, RWA, Yield against a Dexs baseline) and
-// log10(chain count), by ridge least squares (lambda 10, intercept unpenalised),
+// log10(chain count), by least absolute deviations (median) ridge (lambda 10,
+// intercept unpenalised), solved by iteratively reweighted least squares,
 // computed from the snapshot at run time — never from a hardcoded list of names
 // or values. The same function scores every row.
 //
-// The radar-5 search re-tested that model against eighteen alternatives —
-// age and growth terms, per-category slopes, squared terms, tighter trim bands,
-// other ridge penalties, a TVL-weighted ridge, and a two-stage ratio model —
-// and adopted NONE of them. Every candidate is scored on the same 83-comp
-// universe (leave-one-out error and both held-out folds), and a candidate is
-// adopted only if it improves the leave-one-out error without worsening either
-// held-out fold's R-squared. None did: the closest calls were a tighter 10–90
-// trim band, whose apparent win (leave-one-out x2.26) turned out to be an
-// easier evaluation set — scored on the same 83 comps it is x2.62 with a worse
-// first fold — and a ridge lambda of 15, which improves leave-one-out (x2.45)
-// but worsens the first held-out fold (R-squared 0.28 against 0.31). The full
-// table ships in the dashboard so the search is checkable, not asserted. The
-// model stays radar-4.
+// The radar-6 search re-tested that model against thirty-one candidates —
+// the nineteen from the radar-5 search plus twelve new families (a median
+// LAD ridge, a Huber ridge, k-nearest-neighbour peer multiples, a
+// curve-and-cross-check blend, shrunk group intercepts, a winsorized
+// target, a hinge in the size curve, a capped chain count, and two more
+// ridge penalties) — and adopted exactly one: the LAD median ridge, which
+// alone improved the leave-one-out error (x2.48 against x2.63) without
+// worsening either held-out fold (0.32 / 0.28 against 0.31 / 0.23). It fits
+// the median protocol, not the mean, so one rich outlier cannot pull the
+// curve; its mean-based R-squared (0.31) is lower than the mean fit's
+// (0.35) by construction. Every candidate is scored on the same 83-comp
+// universe (leave-one-out error and both held-out folds), and a candidate
+// is adopted only if it improves the leave-one-out error without worsening
+// either held-out fold's R-squared. The closest call was a ridge lambda of
+// 15, which has the best leave-one-out error of all (x2.45) but worsens
+// the first held-out fold (R-squared 0.28 against 0.31). The full table
+// ships in the dashboard so the search is checkable, not asserted. The
+// model is now radar-6.
 //
 // The fit is still weak, and the board says so. Size and category explain about
-// a third of what a token ends up worth (in-sample R-squared about 0.34); the
+// a third of what a token ends up worth (in-sample R-squared about 0.31); the
 // rest is idiosyncratic — the team, the timing, the narrative — none of which a
 // TVL snapshot can see. The dashboard prints the leave-one-out error and both
 // held-out folds beside the formula so the weakness is visible, not hidden.
@@ -97,11 +103,11 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The model's version label: the dashboard names it. */
+/** The model label: 'radar-4' while the clean-comps size curve stands; 'radar-6' if the radar-6 search adopts a new family. */
 export const MODEL_VERSION = 'radar-4';
 
 /** The label of the search that re-tested the model and kept it. */
-export const SEARCH_VERSION = 'radar-5';
+export const SEARCH_VERSION = 'radar-6';
 
 /** The ridge penalty of the fit: 10, on every term but the intercept. */
 export const FIT_LAMBDA = 10;
@@ -157,6 +163,24 @@ export interface FitResult {
   clean: CleanSet;
   candidates: CandidateResult[];
   search_note: string;
+  /** The adopted predictor's family: 'ridge' for the radar-4 curve, or the radar-6 family that beat it. */
+  kind: string;
+  /** A human-readable form of the adopted predictor, for the dashboard's model panel. */
+  formula: string;
+  /** The adopted model's label: 'radar-4' while the clean-comps size curve stands, 'radar-6' when the radar-6 search adopts a new family. */
+  model_label: string;
+  /** The adopted candidate's feature spec, so the board can rebuild its predictor. */
+  spec: FeatureSpec;
+  /** Which training band the adopted candidate fitted on: 'base' is the 5–95 trim, the others tighter bands. */
+  train_band: 'base' | 'band75' | 'band1090';
+  /** Predictor parameters the dashboard's recompute needs: k for kNN, weight for the blend, kappa for shrinkage, the global fit for shrinkage. */
+  extra: {
+    knn_k?: number;
+    blend_weight?: number;
+    shrink_kappa?: number;
+    global_beta?: number[];
+    group_adj?: Record<string, number>;
+  };
 }
 
 /** One age bucket of the launch prior, and the hazard it implies. */
@@ -267,6 +291,10 @@ export interface RadarRow {
   chains_term: number;
   farm_steps: string[];
   comps: PeerComp[];
+  /** The kNN predictor's own value, when the adopted model is kNN: the dashboard recomputes the board from it. */
+  knn_value_usd?: number;
+  /** Whether this row is one of the 40 watchlist slugs. */
+  watchlist?: boolean;
 }
 
 /** One of the ten best bets: highest expected value on the board, with its reason. */
@@ -416,11 +444,22 @@ export interface FeatureSpec {
   slopes?: boolean;
   tvl_sq?: boolean;
   chains_sq?: boolean;
+  /** Fit without the category dummies: the global curve only, for shrinkage candidates. */
+  globalOnly?: boolean;
+  /** A hinge in the size curve: max(0, log10(TVL) - 9). */
+  tvl_hinge?: boolean;
+  /** Cap the chain count at five before taking its log. */
+  chains_cap?: boolean;
 }
 
 /** The names of the features a spec produces, in order, for the dashboard's formula. */
 export function featureNames(spec: FeatureSpec): string[] {
-  const names = ['intercept', 'log10_tvl', ...GROUP_DUMMIES, 'log10_chains'];
+  if (spec.globalOnly) {
+    const names = ['intercept', 'log10_tvl', 'log10_chains'];
+    if (spec.tvl_hinge) names.push('hinge_log10_tvl_9');
+    return names;
+  }
+  const names = ['intercept', 'log10_tvl', ...GROUP_DUMMIES, spec.chains_cap ? 'log10_chains_capped_5' : 'log10_chains'];
   if (spec.age_log) names.push('log10_age_days');
   if (spec.age_buckets) names.push('age_6_12m', 'age_1_2y', 'age_2_3y', 'age_3y_plus');
   if (spec.change_nl) names.push('signed_log1p_change_7d', 'growth_over_5pct');
@@ -428,6 +467,7 @@ export function featureNames(spec: FeatureSpec): string[] {
   if (spec.slopes) names.push('log10_tvl_x_LEND', 'log10_tvl_x_RWA', 'log10_tvl_x_YIELD');
   if (spec.tvl_sq) names.push('log10_tvl_sq');
   if (spec.chains_sq) names.push('log10_chains_sq');
+  if (spec.tvl_hinge) names.push('hinge_log10_tvl_9');
   return names;
 }
 
@@ -449,9 +489,15 @@ function ageBuckets(p: SnapshotProtocol, asOf: string): number[] {
 function featuresFor(p: SnapshotProtocol, spec: FeatureSpec, asOf: string): number[] {
   const g = categoryGroup(p.category);
   const logTvl = Math.log10(Math.max(p.tvl_usd, 1));
+  const logChains = Math.log10(Math.max(spec.chains_cap ? Math.min(p.chains.length, 5) : p.chains.length, 1));
+  if (spec.globalOnly) {
+    const row: number[] = [1, logTvl, logChains];
+    if (spec.tvl_hinge) row.push(Math.max(0, logTvl - 9));
+    return row;
+  }
   const row: number[] = [1, logTvl];
   for (const d of GROUP_DUMMIES) row.push(g === d ? 1 : 0);
-  row.push(Math.log10(Math.max(p.chains.length, 1)));
+  row.push(logChains);
   if (spec.age_log) {
     const age = ageDays(asOf, p.listed_at);
     row.push(Math.log10((age === null ? 365 : age) + 1));
@@ -465,6 +511,7 @@ function featuresFor(p: SnapshotProtocol, spec: FeatureSpec, asOf: string): numb
     const lc = Math.log10(Math.max(p.chains.length, 1));
     row.push(lc * lc);
   }
+  if (spec.tvl_hinge) row.push(Math.max(0, logTvl - 9));
   return row;
 }
 
@@ -511,23 +558,181 @@ function ridgeSolve(X: number[][], y: number[], lambda: number, weights?: number
   return M.map((row, i) => row[n]! / row[i]!);
 }
 
-/** R-squared and the median absolute log10 error of a fitted beta on rows. */
-function fitQuality(X: number[][], y: number[], beta: number[]): { r2: number; medErr: number } {
-  const pred = X.map((row) => row.reduce((s, v, i) => s + v * beta[i]!, 0));
-  const errs = pred.map((p, i) => Math.abs(p - y[i]!));
-  const sorted = [...errs].sort((a, b) => a - b);
-  const med = sorted.length % 2 === 1
+/** The median of a non-empty list, deterministic on ties. */
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted.length % 2 === 1
     ? sorted[(sorted.length - 1) / 2]!
     : (sorted[sorted.length / 2 - 1]! + sorted[sorted.length / 2]!) / 2;
-  const mean = y.reduce((s, v) => s + v, 0) / y.length;
-  const ssTot = y.reduce((s, v) => s + (v - mean) * (v - mean), 0);
-  const ssRes = pred.reduce((s, p, i) => s + (p - y[i]!) * (p - y[i]!), 0);
-  return { r2: ssTot === 0 ? 0 : 1 - ssRes / ssTot, medErr: med };
+}
+
+/** The pool's comps nearest to `p`: same category first, then closest log10(TVL), slug order breaking ties; never `p` itself. */
+function nearestPool(p: SnapshotProtocol, pool: SnapshotProtocol[], k: number): SnapshotProtocol[] {
+  const lt = Math.log10(Math.max(p.tvl_usd, 1));
+  return pool
+    .filter((q) => q.slug !== p.slug)
+    .map((q) => ({
+      q,
+      same: q.category === p.category ? 1 : 0,
+      d: Math.abs(Math.log10(Math.max(q.tvl_usd, 1)) - lt),
+    }))
+    .sort((a, b) => b.same - a.same || a.d - b.d || (a.q.slug < b.q.slug ? -1 : a.q.slug > b.q.slug ? 1 : 0))
+    .slice(0, k)
+    .map(({ q }) => q);
+}
+
+/** The median log10(market cap / TVL) of the `k` nearest pool comps: the peer-multiple engine, in log space. */
+function medianLogRatio(p: SnapshotProtocol, pool: SnapshotProtocol[], k: number): number {
+  const near = nearestPool(p, pool, k);
+  if (near.length === 0) return 0;
+  return medianOf(near.map((q) => Math.log10(q.mcap_usd! / q.tvl_usd)));
+}
+
+/**
+ * Iteratively reweighted ridge: least absolute deviations ('lad', the median
+ * fit) or Huber ('huber', quadratic near zero, linear in the tails). Starts
+ * from the plain ridge beta, reweights by the residuals, and stops when the
+ * coefficients settle or after thirty rounds. Deterministic: same start, same
+ * weights, same solver.
+ */
+function irlsRidge(X: number[][], y: number[], lambda: number, loss: 'lad' | 'huber'): number[] {
+  let beta = ridgeSolve(X, y, lambda);
+  for (let iter = 0; iter < 30; iter++) {
+    const resid = X.map((row, i) => y[i]! - row.reduce((s, v, k) => s + v * beta[k]!, 0));
+    let weights: number[];
+    if (loss === 'lad') {
+      weights = resid.map((r) => 1 / Math.max(Math.abs(r), 0.1));
+    } else {
+      const med = medianOf(resid);
+      const sigma = 1.4826 * medianOf(resid.map((r) => Math.abs(r - med)));
+      const k = 1.345 * Math.max(sigma, 1e-6);
+      weights = resid.map((r) => (Math.abs(r) <= k ? 1 : k / Math.abs(r)));
+    }
+    const next = ridgeSolve(X, y, lambda, weights);
+    const shift = Math.max(...next.map((b, i) => Math.abs(b - beta[i]!)));
+    beta = next;
+    if (shift < 1e-6) break;
+  }
+  return beta;
+}
+
+/** The predictor families the radar-6 search scores. */
+export type PredictorKind = 'ridge' | 'lad' | 'huber' | 'knn' | 'blend' | 'shrink' | 'winsor';
+
+/** A fitted predictor: log10(target) for one protocol, plus what the dashboard needs to recompute it. */
+export interface Predictor {
+  predict: (p: SnapshotProtocol) => number;
+  /** The ridge coefficients behind the prediction, when the family has them (ridge, lad, huber, winsor, blend's ridge half). */
+  beta?: number[];
+  /** The global curve and shrunk group adjustments, for the shrinkage family. */
+  shrink?: { global_beta: number[]; group_adj: Record<string, number> };
+}
+
+/**
+ * One predictor fitted on `train`: ridge and its robust cousins solve for
+ * coefficients; kNN reads the pool at predict time; the blend averages the
+ * ridge curve with the peer-multiple cross-check; shrinkage fits the global
+ * curve and pulls each group's mean residual toward zero by n/(n+kappa).
+ * Every family predicts log10(market cap) unless `ratio` asks for log10(ratio),
+ * in which case the caller adds log10(TVL) back — exactly as the radar-5
+ * scorer did.
+ */
+function makePredictor(
+  train: SnapshotProtocol[],
+  spec: FeatureSpec,
+  lambda: number,
+  ratio: boolean,
+  weight: 'none' | 'tvl',
+  kind: PredictorKind,
+  knnK: number,
+  shrinkKappa: number,
+  asOf: string,
+): Predictor {
+  const wOf = (p: SnapshotProtocol): number => (weight === 'tvl' ? Math.log10(Math.max(p.tvl_usd, 1)) : 1);
+  const weights = train.map(wOf);
+  const X = train.map((p) => featuresFor(p, spec, asOf));
+  const y = train.map((p) => targetOf(p, ratio));
+  const ridgeBeta = (xs: number[][], ys: number[], ws?: number[]): number[] =>
+    ridgeSolve(xs, ys, lambda, ws).map(round4);
+  if (kind === 'knn') {
+    return {
+      predict: (p: SnapshotProtocol): number => {
+        const m = medianLogRatio(p, train, knnK);
+        return ratio ? m : m + Math.log10(Math.max(p.tvl_usd, 1));
+      },
+    };
+  }
+  if (kind === 'blend') {
+    const beta = ridgeBeta(X, y, weights);
+    return {
+      beta,
+      predict: (p: SnapshotProtocol): number => {
+        const ridge = featuresFor(p, spec, asOf).reduce((s, v, i) => s + v * beta[i]!, 0);
+        const cross = medianLogRatio(p, train, 5) + Math.log10(Math.max(p.tvl_usd, 1));
+        const crossTarget = ratio ? cross - Math.log10(Math.max(p.tvl_usd, 1)) : cross;
+        return 0.5 * ridge + 0.5 * crossTarget;
+      },
+    };
+  }
+  if (kind === 'shrink') {
+    const gspec: FeatureSpec = { ...spec, globalOnly: true };
+    const Xg = train.map((p) => featuresFor(p, gspec, asOf));
+    const betaG = ridgeBeta(Xg, y, weights);
+    const resid = train.map((p, i) => y[i]! - Xg[i]!.reduce((s, v, k) => s + v * betaG[k]!, 0));
+    const groups = ['LEND', 'RWA', 'YIELD', 'OTHER'];
+    const groupAdj: Record<string, number> = {};
+    for (const g of groups) {
+      const rs = train.map((p, i) => (categoryGroup(p.category) === g ? resid[i]! : null)).filter((r): r is number => r !== null);
+      const mean = rs.length > 0 ? rs.reduce((s, v) => s + v, 0) / rs.length : 0;
+      groupAdj[g] = round4(mean * (rs.length / (rs.length + shrinkKappa)));
+    }
+    return {
+      beta: betaG,
+      shrink: { global_beta: betaG, group_adj: groupAdj },
+      predict: (p: SnapshotProtocol): number => {
+        const base = featuresFor(p, gspec, asOf).reduce((s, v, i) => s + v * betaG[i]!, 0);
+        return base + (groupAdj[categoryGroup(p.category)] ?? 0);
+      },
+    };
+  }
+  if (kind === 'winsor') {
+    const ys = [...y].sort((a, b) => a - b);
+    const lo = ys[Math.floor(0.05 * ys.length)]!;
+    const hi = ys[Math.floor(0.95 * ys.length) - 1]!;
+    const clipped = y.map((v) => Math.min(hi, Math.max(lo, v)));
+    const beta = ridgeBeta(X, clipped, weights);
+    return {
+      beta,
+      predict: (p: SnapshotProtocol): number => featuresFor(p, spec, asOf).reduce((s, v, i) => s + v * beta[i]!, 0),
+    };
+  }
+  if (kind === 'lad' || kind === 'huber') {
+    const beta = irlsRidge(X, y, lambda, kind).map(round4);
+    return {
+      beta,
+      predict: (p: SnapshotProtocol): number => featuresFor(p, spec, asOf).reduce((s, v, i) => s + v * beta[i]!, 0),
+    };
+  }
+  const beta = ridgeBeta(X, y, weights);
+  return {
+    beta,
+    predict: (p: SnapshotProtocol): number => featuresFor(p, spec, asOf).reduce((s, v, i) => s + v * beta[i]!, 0),
+  };
 }
 
 /** The target a candidate fits: log10(market cap), or log10(market cap / TVL) for a two-stage ratio model. */
 function targetOf(p: SnapshotProtocol, ratio: boolean): number {
   return ratio ? Math.log10(p.mcap_usd! / p.tvl_usd) : Math.log10(p.mcap_usd!);
+}
+
+/** R-squared and the median absolute log10 error of predictions against targets. */
+function qualityOf(pred: number[], y: number[]): { r2: number; medErr: number } {
+  const errs = pred.map((p, i) => Math.abs(p - y[i]!));
+  const med = medianOf(errs);
+  const mean = y.reduce((s, v) => s + v, 0) / y.length;
+  const ssTot = y.reduce((s, v) => s + (v - mean) * (v - mean), 0);
+  const ssRes = pred.reduce((s, p, i) => s + (p - y[i]!) * (p - y[i]!), 0);
+  return { r2: ssTot === 0 ? 0 : 1 - ssRes / ssTot, medErr: med };
 }
 
 /**
@@ -538,7 +743,8 @@ function targetOf(p: SnapshotProtocol, ratio: boolean): number {
  * i%5 in {0,1} and {2,3}). Scoring every candidate on the same universe is
  * what keeps a tighter trim band honest: a band that merely drops the hardest
  * comps from its own evaluation cannot win here, because the universe still
- * contains them.
+ * contains them. The predictor is refit from scratch for every leave-one-out
+ * and fold evaluation, so no candidate sees its own test row.
  */
 function scoreCandidate(
   universe: SnapshotProtocol[],
@@ -548,30 +754,27 @@ function scoreCandidate(
   ratio: boolean,
   asOf: string,
   weight: 'none' | 'tvl' = 'none',
+  kind: PredictorKind = 'ridge',
+  knnK = 5,
+  shrinkKappa = 10,
 ): { r2_full: number; med_err_full: number; loo_med_err: number; loo_raw: number; folds: FitResult['folds'] } {
-  const wOf = (p: SnapshotProtocol): number => (weight === 'tvl' ? Math.log10(Math.max(p.tvl_usd, 1)) : 1);
-  const X = universe.map((p) => featuresFor(p, spec, asOf));
   const y = universe.map((p) => targetOf(p, ratio));
-  const betaTrain = ridgeSolve(train.map((p) => featuresFor(p, spec, asOf)), train.map((p) => targetOf(p, ratio)), lambda, train.map(wOf)).map(round4);
-  const full = fitQuality(X, y, betaTrain);
+  const fullPred = makePredictor(train, spec, lambda, ratio, weight, kind, knnK, shrinkKappa, asOf);
+  const full = qualityOf(universe.map((p) => fullPred.predict(p)), y);
   const errs: number[] = [];
   for (let i = 0; i < universe.length; i++) {
     const rest = train.filter((q) => q.slug !== universe[i]!.slug);
-    const beta = ridgeSolve(rest.map((p) => featuresFor(p, spec, asOf)), rest.map((p) => targetOf(p, ratio)), lambda, rest.map(wOf));
-    const pred = featuresFor(universe[i]!, spec, asOf).reduce((s, v, k) => s + v * beta[k]!, 0);
-    errs.push(Math.abs(pred - y[i]!));
+    const pred = makePredictor(rest, spec, lambda, ratio, weight, kind, knnK, shrinkKappa, asOf);
+    errs.push(Math.abs(pred.predict(universe[i]!) - y[i]!));
   }
-  const sorted = [...errs].sort((a, b) => a - b);
-  const loo = sorted.length % 2 === 1
-    ? sorted[(sorted.length - 1) / 2]!
-    : (sorted[sorted.length / 2 - 1]! + sorted[sorted.length / 2]!) / 2;
+  const loo = medianOf(errs);
   const folds: FitResult['folds'] = [];
   for (const testRes of [[0, 1], [2, 3]]) {
     const teIdx = universe.map((_, i) => i).filter((i) => testRes.includes(i % 5));
     const teSlugs = new Set(teIdx.map((i) => universe[i]!.slug));
     const tr = train.filter((q) => !teSlugs.has(q.slug));
-    const betaFold = ridgeSolve(tr.map((p) => featuresFor(p, spec, asOf)), tr.map((p) => targetOf(p, ratio)), lambda, tr.map(wOf)).map(round4);
-    const q = fitQuality(teIdx.map((i) => X[i]!), teIdx.map((i) => y[i]!), betaFold);
+    const foldPred = makePredictor(tr, spec, lambda, ratio, weight, kind, knnK, shrinkKappa, asOf);
+    const q = qualityOf(teIdx.map((i) => foldPred.predict(universe[i]!)), teIdx.map((i) => y[i]!));
     folds.push({ test: `i%5 in {${testRes.join(',')}}`, n_test: teIdx.length, r2: round4(q.r2), med_err: round4(q.medErr) });
   }
   return { r2_full: round4(full.r2), med_err_full: round4(full.medErr), loo_med_err: round4(loo), loo_raw: loo, folds };
@@ -651,7 +854,7 @@ export function cleanTrainingSet(snapshot: Snapshot, loQ = 0.05, hiQ = 0.95): { 
   return { clean, cleanSet };
 }
 
-/** One entry of the radar-5 search: what to fit, on which training set, at which penalty. */
+/** One entry of the radar-6 search: what to fit, on which training set, at which penalty, in which family. */
 interface SearchSpec {
   name: string;
   spec: FeatureSpec;
@@ -659,9 +862,12 @@ interface SearchSpec {
   lambda: number;
   ratio: boolean;
   weight?: 'tvl';
+  kind?: PredictorKind;
+  knn_k?: number;
+  shrink_kappa?: number;
 }
 
-/** The radar-5 search: nineteen candidates, all scored on the same 83-comp universe. */
+/** The radar-6 search: thirty-one candidates, all scored on the same 83-comp universe — the nineteen from radar-5 plus twelve new families. */
 const SEARCH_SPECS: SearchSpec[] = [
   { name: 'radar-4 baseline', spec: {}, train: 'base', lambda: 10, ratio: false },
   { name: 'baseline + log age', spec: { age_log: true }, train: 'base', lambda: 10, ratio: false },
@@ -682,17 +888,57 @@ const SEARCH_SPECS: SearchSpec[] = [
   { name: 'TVL-weighted ridge', spec: {}, train: 'base', lambda: 10, ratio: false, weight: 'tvl' },
   { name: 'two-stage ratio model', spec: {}, train: 'base', lambda: 10, ratio: true },
   { name: 'two-stage ratio + growth', spec: { change_nl: true }, train: 'base', lambda: 10, ratio: true },
+  { name: 'ridge lambda 6', spec: {}, train: 'base', lambda: 6, ratio: false },
+  { name: 'ridge lambda 12', spec: {}, train: 'base', lambda: 12, ratio: false },
+  { name: 'LAD median ridge', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'lad' },
+  { name: 'Huber ridge', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'huber' },
+  { name: 'kNN median-ratio k=5', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'knn', knn_k: 5 },
+  { name: 'kNN median-ratio k=8', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'knn', knn_k: 8 },
+  { name: 'blend fitted + cross-check', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'blend' },
+  { name: 'shrinkage group intercepts k=5', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'shrink', shrink_kappa: 5 },
+  { name: 'shrinkage group intercepts k=10', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'shrink', shrink_kappa: 10 },
+  { name: 'winsorized target 5–95', spec: {}, train: 'base', lambda: 10, ratio: false, kind: 'winsor' },
+  { name: 'hinge at logTVL 9', spec: { tvl_hinge: true }, train: 'base', lambda: 10, ratio: false },
+  { name: 'chains capped at 5', spec: { chains_cap: true }, train: 'base', lambda: 10, ratio: false },
 ];
 
+/** A human-readable form of one candidate's predictor, for the dashboard's model panel. */
+function formulaOf(s: SearchSpec, beta: number[], trainN: number, shrink?: { global_beta: number[]; group_adj: Record<string, number> }): string {
+  const kind = s.kind ?? 'ridge';
+  const lam = `ridge lambda ${s.lambda}`;
+  if (kind === 'knn') {
+    return `k-nearest-neighbour median ratio (k=${s.knn_k ?? 5}): implied value = TVL x the median market-cap-to-TVL of the ${s.knn_k ?? 5} nearest clean comps (same category first, then closest TVL). No fitted curve; the value is the peers' own multiple.`;
+  }
+  if (kind === 'blend') {
+    return `Blend: half the ridge curve (${lam}) and half the peer-multiple cross-check (median market-cap-to-TVL of the 5 nearest comps, times TVL). Two independent estimates averaged, so one bad peer set cannot dominate.`;
+  }
+  if (kind === 'shrink' && shrink !== undefined) {
+    const adj = ['LEND', 'RWA', 'YIELD', 'OTHER'].map((g) => `${g} ${(shrink.group_adj[g] ?? 0) >= 0 ? '+' : ''}${(shrink.group_adj[g] ?? 0).toFixed(4)}`).join(', ');
+    return `Global ridge curve (${lam}, no category dummies) plus group intercepts shrunk toward zero by n/(n+${s.shrink_kappa ?? 10}): ${adj}. Small groups borrow strength from the global curve instead of fitting noise.`;
+  }
+  const terms = GROUP_DUMMIES.map((g, i) => `${g} ${beta[2 + i]! >= 0 ? '+' : ''}${beta[2 + i]!.toFixed(4)}`).join(', ');
+  const chainsNote = s.spec.chains_cap ? 'log10(chain count, capped at 5)' : 'log10(chain count)';
+  const hingeNote = s.spec.tvl_hinge ? ` | hinge max(0, log10(TVL) - 9) x ${beta[beta.length - 1]!.toFixed(4)}` : '';
+  const family = kind === 'lad'
+    ? 'Least absolute deviations (median) ridge: fits the median market cap, not the mean, so one rich outlier cannot pull the curve. '
+    : kind === 'huber'
+      ? 'Huber ridge: quadratic near zero, linear in the tails, so large misses count less than under least squares. '
+      : kind === 'winsor'
+        ? 'Ridge on the winsorized target: market caps clipped to the 5th–95th percentile band before fitting. '
+        : '';
+  return `${family}log10(implied value) = ${beta[0]!.toFixed(4)} + ${beta[1]!.toFixed(4)} x log10(tvl_usd)   |   group adjustments (Dexs = 0): ${terms}   |   chains term ${beta[5]!.toFixed(4)} x ${chainsNote}${hingeNote}   |   ${lam}, fitted on ${trainN} clean comps`;
+}
+
 /**
- * The fitted model: the radar-5 search scores every candidate on the same
+ * The fitted model: the radar-6 search scores every candidate on the same
  * 83-comp universe and adopts one only if it improves the leave-one-out error
- * without worsening either held-out fold's R-squared. None does, so the
- * adopted model is the radar-4 baseline and its beta is the one the board
- * uses. Deterministic: the training sets are slug-sorted and the solver
- * pivots the same way. The beta is rounded to four decimals before anything
- * uses it, so the dashboard's recompute from the shipped coefficients
- * matches the board exactly.
+ * without worsening either held-out fold's R-squared. The adopted model's
+ * beta is the one the board uses; for families without coefficients (kNN) the
+ * beta is the baseline ridge beta, kept for reference, and the formula says
+ * how the board is actually scored. Deterministic: the training sets are
+ * slug-sorted and the solver pivots the same way. The beta is rounded to four
+ * decimals before anything uses it, so the dashboard's recompute from the
+ * shipped coefficients matches the board exactly.
  */
 export function fitModel(snapshot: Snapshot): FitResult {
   const { clean: universe, cleanSet } = cleanTrainingSet(snapshot);
@@ -702,13 +948,10 @@ export function fitModel(snapshot: Snapshot): FitResult {
   const trainNoteOf = (t: SearchSpec['train']): string => (t === 'band75' ? 'trim 7.5–92.5 pctile' : t === 'band1090' ? 'trim 10–90 pctile' : 'trim 5–95 pctile');
   const scored = SEARCH_SPECS.map((s) => {
     const train = trainOf(s.train);
-    const r = scoreCandidate(universe, train, s.spec, s.lambda, s.ratio, snapshot.as_of, s.weight ?? 'none');
-    const beta = ridgeSolve(
-      train.map((p) => featuresFor(p, s.spec, snapshot.as_of)),
-      train.map((p) => targetOf(p, s.ratio)),
-      s.lambda,
-      s.weight === 'tvl' ? train.map((p) => Math.log10(Math.max(p.tvl_usd, 1))) : undefined,
-    ).map(round4);
+    const kind = s.kind ?? 'ridge';
+    const r = scoreCandidate(universe, train, s.spec, s.lambda, s.ratio, snapshot.as_of, s.weight ?? 'none', kind, s.knn_k ?? 5, s.shrink_kappa ?? 10);
+    const predictor = makePredictor(train, s.spec, s.lambda, s.ratio, s.weight ?? 'none', kind, s.knn_k ?? 5, s.shrink_kappa ?? 10, snapshot.as_of);
+    const beta = predictor.beta ?? makePredictor(train, s.spec, s.lambda, s.ratio, s.weight ?? 'none', 'ridge', 5, 10, snapshot.as_of).beta!;
     return {
       name: s.name,
       features: featureNames(s.spec),
@@ -721,16 +964,24 @@ export function fitModel(snapshot: Snapshot): FitResult {
       loo_x: round4(10 ** r.loo_raw),
       folds: r.folds,
       beta,
+      kind,
+      spec: s.spec,
+      train_band: s.train,
+      ratio: s.ratio,
+      knn_k: s.knn_k,
+      shrink_kappa: s.shrink_kappa,
+      shrink: predictor.shrink,
       adopted: false,
     };
   });
   const baseline = scored[0]!;
   // Adopt only a candidate that improves leave-one-out error and worsens
-  // neither held-out fold's R-squared. The closest calls fail the fold rule:
-  // a tighter trim band and a larger ridge penalty both buy leave-one-out
-  // error by giving up a fold.
+  // neither held-out fold's R-squared — and only among candidates scored on
+  // the log10(market cap) target, so a ratio model is never compared across
+  // units. The closest calls fail the fold rule: a tighter trim band and a
+  // larger ridge penalty both buy leave-one-out error by giving up a fold.
   const qualifiers = scored.filter(
-    (c) => c !== baseline && c.loo_med_err < baseline.loo_med_err && c.folds[0]!.r2 >= baseline.folds[0]!.r2 && c.folds[1]!.r2 >= baseline.folds[1]!.r2,
+    (c) => c !== baseline && !c.ratio && c.loo_med_err < baseline.loo_med_err && c.folds[0]!.r2 >= baseline.folds[0]!.r2 && c.folds[1]!.r2 >= baseline.folds[1]!.r2,
   );
   qualifiers.sort((a, b) => a.loo_med_err - b.loo_med_err);
   const adopted = qualifiers.length > 0 ? qualifiers[0]! : baseline;
@@ -738,13 +989,31 @@ export function fitModel(snapshot: Snapshot): FitResult {
   const searchNote = adopted === baseline
     ? `The ${SEARCH_VERSION} search scored ${scored.length} candidates on the same ${universe.length}-comp universe; none improved leave-one-out error without worsening a held-out fold, so radar-4 stands.`
     : `The ${SEARCH_VERSION} search adopted ${adopted.name}: leave-one-out error x${adopted.loo_x} with both held-out folds at least as good as the baseline.`;
-  const { beta, ...rest } = adopted;
+  const formula = formulaOf(
+    { name: adopted.name, spec: adopted.spec, train: adopted.train_band, lambda: adopted.lambda, ratio: false, kind: adopted.kind as PredictorKind, knn_k: adopted.knn_k, shrink_kappa: adopted.shrink_kappa },
+    adopted.beta,
+    adopted.train_n,
+    adopted.shrink,
+  );
+  const modelLabel = adopted === baseline ? 'radar-4' : 'radar-6';
+  const { beta, spec, train_band, ratio: _ratio, knn_k, shrink_kappa, shrink, ...rest } = adopted;
   return {
     ...rest,
     beta,
+    spec,
+    train_band,
+    kind: adopted.kind,
+    formula,
+    model_label: modelLabel,
+    extra: {
+      knn_k: adopted.knn_k,
+      shrink_kappa: adopted.shrink_kappa,
+      global_beta: adopted.shrink?.global_beta,
+      group_adj: adopted.shrink?.group_adj,
+    },
     clean: cleanSet,
     search_note: searchNote,
-    candidates: scored.map(({ beta: _b, ...c }) => c),
+    candidates: scored.map(({ beta: _b, spec: _s, shrink: _sh, ratio: _r, ...c }) => c),
   };
 }
 
@@ -801,20 +1070,27 @@ export function hazardFor(age: number | null, prior: LaunchPrior): number {
   return prior.unknown_hazard;
 }
 
-/** The fitted log10 implied value of one protocol under `beta`. */
-export function logImplied(p: SnapshotProtocol, beta: number[]): number {
-  const x = features(p);
-  return x.reduce((s, v, i) => s + v * beta[i]!, 0);
+/** The fitted log10 implied value of one protocol under the adopted predictor, fitted once per board build. */
+function predictLog(p: SnapshotProtocol, predictor: Predictor): number {
+  return predictor.predict(p);
 }
 
-/** The fitted implied value: 10 to the fitted log value, whole dollars, capped at the gate's ceiling. */
-export function impliedValue(p: SnapshotProtocol, beta: number[]): { implied: number; log10: number; groupAdj: number; chainsTerm: number } {
-  const log10 = Math.min(14, Math.max(0, logImplied(p, beta)));
+/** The fitted implied value: 10 to the fitted log value, whole dollars, capped at the gate's ceiling. The group and chains terms decompose the value for the dashboard's detail view: from the ridge coefficients for ridge-family models, from the shrunk adjustments for shrinkage, and zero for kNN, whose value comes from the peers directly. */
+export function impliedValue(p: SnapshotProtocol, predictor: Predictor, fit: FitResult): { implied: number; log10: number; groupAdj: number; chainsTerm: number } {
+  const log10 = Math.min(14, Math.max(0, predictLog(p, predictor)));
   const implied = Math.max(1, Math.round(10 ** log10));
   const g = categoryGroup(p.category);
+  const logChains = Math.log10(Math.max(fit.spec.chains_cap ? Math.min(p.chains.length, 5) : p.chains.length, 1));
+  if (fit.kind === 'knn') return { implied, log10: round4(log10), groupAdj: 0, chainsTerm: 0 };
+  if (fit.kind === 'shrink') {
+    const groupAdj = fit.extra.group_adj?.[g] ?? 0;
+    const chainsTerm = round4((fit.extra.global_beta?.[2] ?? 0) * logChains);
+    return { implied, log10: round4(log10), groupAdj: round4(groupAdj), chainsTerm };
+  }
+  const beta = fit.beta;
   const di = GROUP_DUMMIES.indexOf(g);
   const groupAdj = di >= 0 ? beta[2 + di]! : 0;
-  const chainsTerm = round4(beta[5]! * Math.log10(Math.max(p.chains.length, 1)));
+  const chainsTerm = round4(beta[5]! * logChains);
   return { implied, log10: round4(log10), groupAdj: round4(groupAdj), chainsTerm };
 }
 
@@ -822,6 +1098,14 @@ export function impliedValue(p: SnapshotProtocol, beta: number[]): { implied: nu
 export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrior, clean: SnapshotProtocol[]): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
+  // The adopted predictor, fitted once on the adopted candidate's own training
+  // set — the board never refits per row, so every row is scored by one function.
+  const trainSet = fit.train_band === 'band75'
+    ? cleanTrainingSet(snapshot, 0.075, 0.925).clean
+    : fit.train_band === 'band1090'
+      ? cleanTrainingSet(snapshot, 0.1, 0.9).clean
+      : clean;
+  const predictor = makePredictor(trainSet, fit.spec, fit.lambda, false, 'none', fit.kind as PredictorKind, fit.extra.knn_k ?? 5, fit.extra.shrink_kappa ?? 10, snapshot.as_of);
   // The watchlist is the floor: every slug, even one the snapshot no longer carries.
   for (const slug of snapshot.watchlist) {
     const p = index.get(slug);
@@ -831,12 +1115,12 @@ export function buildBoard(snapshot: Snapshot, fit: FitResult, prior: LaunchPrio
   // implied value first. No cap: the board is the whole rankable set.
   const rest = snapshot.protocols
     .filter((p) => !chosen.has(p.slug) && isRankable(p))
-    .map((p) => ({ p, implied: impliedValue(p, fit.beta).implied }))
+    .map((p) => ({ p, implied: impliedValue(p, predictor, fit).implied }))
     .sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   for (const e of rest) chosen.set(e.p.slug, e.p);
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, fit.beta);
+    const v = impliedValue(p, predictor, fit);
     const age = ageDays(snapshot.as_of, p.listed_at);
     const launch = hazardFor(age, prior);
     const impliedLow = Math.max(1, Math.round(v.implied / fit.loo_x));
@@ -1208,7 +1492,7 @@ export function buildAccounting(snapshot: Snapshot, board: BoardRow[], live: Liv
 }
 
 /** A board row's compact form for data.js, with its three nearest tokened comparables. */
-export function radarRow(row: BoardRow, clean: SnapshotProtocol[]): RadarRow {
+export function radarRow(row: BoardRow, clean: SnapshotProtocol[], fit: FitResult, watchlist: Set<string>): RadarRow {
   const p: SnapshotProtocol = {
     slug: row.slug,
     name: row.name,
@@ -1221,7 +1505,7 @@ export function radarRow(row: BoardRow, clean: SnapshotProtocol[]): RadarRow {
     gecko_id: row.gecko_id,
     symbol: row.symbol,
   };
-  return {
+  const out: RadarRow = {
     rank: row.rank,
     slug: row.slug,
     name: row.name,
@@ -1251,6 +1535,12 @@ export function radarRow(row: BoardRow, clean: SnapshotProtocol[]): RadarRow {
     farm_steps: row.farm_steps,
     comps: peerComps(p, clean),
   };
+  if (fit.kind === 'knn') {
+    const m = medianLogRatio(p, clean, fit.extra.knn_k ?? 5);
+    out.knn_value_usd = Math.max(1, Math.round(10 ** (m + Math.log10(Math.max(p.tvl_usd, 1)))));
+  }
+  if (watchlist.has(row.slug)) out.watchlist = true;
+  return out;
 }
 
 /** Where the ranked set's TVL sits: by main chain and by category, top five each, straight from the snapshot. */
@@ -1326,13 +1616,13 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       r2_full: fit.r2_full,
       limits: 'Size and category explain about a third of launch value; the rest is the team, the timing and the narrative, which no TVL snapshot can see.',
     },
-    model_version: MODEL_VERSION,
+    model_version: fit.model_label,
     search_version: SEARCH_VERSION,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    rows: board.map((r) => radarRow(r, clean)),
+    rows: board.map((r) => radarRow(r, clean, fit, new Set(snapshot.watchlist))),
     live,
     accounting,
     best_bets: bestBets(board),
